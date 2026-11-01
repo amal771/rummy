@@ -1,11 +1,14 @@
 class Deck {
   /**
-   * Standard setup: one pack for 2 players, two packs for 3+ players.
+   * One pack for 2 players, two packs for 3+, and more packs as the table grows
+   * so there are always at least ~30 cards left in the stock after dealing.
    * Each pack = 52 cards + printed jokers.
    */
   constructor(playerCount, printedJokersPerDeck = 2) {
     this.cards = [];
-    const numDecks = playerCount <= 2 ? 1 : 2;
+    const packSize = 52 + printedJokersPerDeck;
+    const needed = playerCount * 13 + 2 + 30;
+    const numDecks = Math.max(playerCount <= 2 ? 1 : 2, Math.ceil(needed / packSize));
     const suits = ['S', 'H', 'D', 'C'];
     for (let d = 0; d < numDecks; d++) {
       for (const suit of suits) {
