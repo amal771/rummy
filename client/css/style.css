@@ -1,210 +1,137 @@
-* {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
-}
-
-body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  background-color: #0b381e;
-  color: #fff;
-  height: 100vh;
-  overflow: hidden;
-  user-select: none;
-}
-
-/* Fluorescent Green Border Pulse (3 Seconds) */
-.turn-border {
-  position: fixed;
-  inset: 0;
-  border: 8px solid #39ff14;
-  box-shadow: 0 0 25px #39ff14, inset 0 0 25px #39ff14;
-  pointer-events: none;
-  z-index: 9999;
-  animation: neon-fade 3s forwards ease-out;
-}
-
-@keyframes neon-fade {
-  0% { opacity: 1; }
-  70% { opacity: 1; }
-  100% { opacity: 0; }
-}
-
-.hidden {
-  display: none !important;
-}
-
-.game-header {
-  height: 50px;
-  background-color: #062313;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 0 1.5rem;
-  border-bottom: 2px solid #04180d;
-}
-
-.table-surface {
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  height: calc(100vh - 50px);
-  padding: 1rem;
-}
-
-.center-play-area {
+/* --- Lobby Screen Styles --- */
+.lobby-container {
   display: flex;
   justify-content: center;
   align-items: center;
-  gap: 2.5rem;
-  margin-top: 2rem;
-}
-
-/* Card Styling */
-.card, .card-pile {
-  width: 75px;
-  height: 105px;
-  border-radius: 6px;
-  background: #ffffff;
-  color: #111;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  padding: 6px;
-  box-shadow: 0 4px 8px rgba(0,0,0,0.4);
-  position: relative;
-  cursor: pointer;
-}
-
-.card.red { color: #d32f2f; }
-.card.black { color: #111; }
-
-.card-back {
-  background: repeating-linear-gradient(45deg, #1a237e, #1a237e 8px, #283593 8px, #283593 16px);
-  border: 2px solid #fff;
-}
-
-.joker-indicator {
-  position: absolute;
-  bottom: 4px;
-  left: 6px;
-  font-size: 10px;
-  font-weight: bold;
-  color: #ff9800;
-}
-
-/* Groups / Melds Layout */
-.player-hand-container {
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
-}
-
-.hand-action-bar {
-  display: flex;
-  justify-content: center;
-  gap: 0.75rem;
-}
-
-.melds-wrapper {
-  display: flex;
-  justify-content: center;
-  gap: 1.5rem;
-  min-height: 140px;
-  overflow-x: auto;
-  padding-bottom: 0.5rem;
-}
-
-.meld-column {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 0.5rem;
-}
-
-.meld-cards {
-  display: flex;
-  margin-left: 15px;
-}
-
-.meld-cards .card {
-  margin-left: -25px;
-  transition: transform 0.15s ease;
-}
-
-.meld-cards .card:hover {
-  transform: translateY(-8px);
-}
-
-.group-badge {
-  font-size: 11px;
-  font-weight: bold;
-  padding: 2px 8px;
-  border-radius: 4px;
-  text-transform: uppercase;
-}
-
-.badge-pure { background-color: #2e7d32; color: #fff; }
-.badge-impure { background-color: #f57f17; color: #fff; }
-.badge-set { background-color: #0288d1; color: #fff; }
-.badge-invalid { background-color: #c62828; color: #fff; }
-
-/* Buttons & Controls */
-.btn {
-  background-color: #37474f;
-  color: #fff;
-  border: none;
-  padding: 6px 14px;
-  border-radius: 4px;
-  cursor: pointer;
-  font-weight: 600;
-}
-
-.btn:hover { background-color: #455a64; }
-.primary-btn { background-color: #0288d1; }
-.danger-btn { background-color: #d32f2f; }
-.warning-btn { background-color: #f57c00; }
-.success-btn { background-color: #2e7d32; }
-.accent-btn { background-color: #7b1fa2; }
-
-/* Modals */
-.modal-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0,0,0,0.75);
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  z-index: 10000;
-}
-
-.modal-box {
-  background: #1e272c;
+  min-height: 100vh;
+  background: radial-gradient(circle, #0e4d28 0%, #062313 100%);
   padding: 1.5rem;
-  border-radius: 8px;
-  text-align: center;
 }
 
-.large-modal {
-  width: 80%;
-  max-width: 900px;
-  max-height: 80vh;
-  overflow-y: auto;
-}
-
-.leaderboard-table {
+.lobby-card {
+  background: #17241d;
+  border: 1px solid #2e4d3b;
+  border-radius: 12px;
   width: 100%;
-  border-collapse: collapse;
+  max-width: 760px;
+  padding: 2rem;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+}
+
+.lobby-title {
+  text-align: center;
+  margin-bottom: 1.5rem;
+  color: #ffd700;
+  letter-spacing: 2px;
+}
+
+.lobby-actions-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
   margin-top: 1rem;
 }
 
-.leaderboard-table th, .leaderboard-table td {
-  padding: 10px;
-  border: 1px solid #37474f;
-  text-align: center;
+@media (max-width: 640px) {
+  .lobby-actions-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
-.leaderboard-table th {
-  background-color: #263238;
-  cursor: pointer;
+.lobby-panel {
+  background: #1f3327;
+  padding: 1.25rem;
+  border-radius: 8px;
+  border: 1px solid #2d4c38;
+}
+
+.lobby-panel h3 {
+  margin-bottom: 1rem;
+  color: #e0e0e0;
+  font-size: 1.1rem;
+}
+
+.btn-block {
+  width: 100%;
+  margin-top: 10px;
+}
+
+.btn-large {
+  width: 100%;
+  font-size: 1.1rem;
+  padding: 12px;
+  margin-top: 15px;
+}
+
+.divider {
+  border: 0;
+  border-top: 1px solid #2d4c38;
+  margin: 1.5rem 0;
+}
+
+.highlight-code {
+  color: #39ff14;
+  letter-spacing: 4px;
+}
+
+/* QR Code & Share link section */
+.share-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  background: #122018;
+  padding: 1rem;
+  border-radius: 8px;
+  margin: 1rem 0;
+}
+
+#qrcode-container {
+  background: #fff;
+  padding: 8px;
+  border-radius: 6px;
+  display: inline-block;
+}
+
+.share-controls {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  max-width: 420px;
+}
+
+.share-controls input {
+  flex: 1;
+  padding: 8px;
+  border-radius: 4px;
+  border: 1px solid #455a64;
+  background: #263238;
+  color: #fff;
+}
+
+.roster-list-container {
+  margin-top: 1rem;
+}
+
+#roster-list {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+#roster-list li {
+  background: #284433;
+  padding: 4px 10px;
+  border-radius: 14px;
+  font-size: 13px;
+  border: 1px solid #3c684d;
+}
+
+.waiting-msg {
+  text-align: center;
+  margin-top: 10px;
+  color: #b0bec5;
+  font-style: italic;
 }
