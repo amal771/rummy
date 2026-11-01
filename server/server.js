@@ -23,6 +23,11 @@ const io = new Server(server, {
 
 const PORT = process.env.PORT || 3000;
 
+// Share the meld rules with the browser so hand badges match server validation
+app.get('/shared/rules.js', (req, res) => {
+  res.sendFile(path.join(__dirname, 'logic/validator.js'));
+});
+
 // Serve static frontend assets from client/
 app.use(express.static(path.join(__dirname, '../client')));
 

@@ -1,522 +1,614 @@
 const Deck = require('./models/Deck');
-const { autoSortHand } = require('./logic/autoSorter');
+const { bestArrangement } = require('./logic/autoSorter');
 const { validateDeclaration, calculateHandPoints } = require('./logic/scoring');
-const { isValidPureSequence, classifyGroup } = require('./logic/validator');
+const { isValidPureSequence } = require('./logic/validator');
 
-// In-memory room storage: roomId -> Room instance
-const rooms = new Map();
+const rooms = new Map(); // roomId -> room
+
+const TURN_SECONDS = 30;
+const REDUCED_SECONDS = 10;
+const OFFLINE_SECONDS = 3;
+const MAX_MISSED_TURNS = 3;   // auto-drop after this many missed turns in a row
+const COUNTDOWN_SECONDS = Number(process.env.RUMMY_COUNTDOWN) || 10;
+const SHOW_SECONDS = Number(process.env.RUMMY_SHOW) || 45;
+const FIRST_DROP = 20;
+const MIDDLE_DROP = 40;
+const MAX_POINTS = 80;
+const CODE_LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+
+const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
+const cleanName = s => String(s || '').replace(/[<>&"']/g, '').trim().slice(0, 15);
+const cleanKey = s => String(s || '').replace(/[^\w-]/g, '').slice(0, 64);
 
 function registerSocketHandlers(io) {
+
+  // ---------- helpers ----------
+  const ctx = (socket) => {
+    const room = rooms.get(socket.data.roomId);
+    const player = room && room.players.get(socket.data.key);
+    return player && player.sid === socket.id ? { room, player } : {};
+  };
+  const toPlayer = (p, ev, data) => { if (p.sid) io.to(p.sid).emit(ev, data); };
+  const toRoom = (room, ev, data) => io.to(room.roomId).emit(ev, data);
+  const active = room => [...room.players.values()].filter(p => p.status === 'ACTIVE');
+  const activePlayer = room => room.players.get(room.turnOrder[room.activeTurnIndex]);
+  const canUseJoker = (room, p) => room.config.jokerMode === 'open' || p.hasSeenHiddenJoker;
+  const inTurn = (room, p) => room.status === 'PLAYING' && !room.isPaused && activePlayer(room) === p;
+
+  function generateCode() {
+    for (;;) {
+      let code = '';
+      for (let i = 0; i < 4; i++) code += CODE_LETTERS[Math.floor(Math.random() * CODE_LETTERS.length)];
+      if (!rooms.has(code)) return code;
+    }
+  }
+
+  function newPlayer(room, key, name) {
+    let finalName = name, n = 2;
+    const taken = () => [...room.players.values()].some(p => p.name.toLowerCase() === finalName.toLowerCase());
+    while (taken()) finalName = `${name.slice(0, 12)} ${n++}`;
+    return {
+      key, sid: null, name: finalName, hand: [],
+      status: 'SPECTATOR',          // SPECTATOR | ACTIVE | DROPPED | OUT
+      phase: 'WAIT',                // WAIT | DRAW | DISCARD
+      turnsPlayed: 0, lastDrawnId: null, hasSeenHiddenJoker: false,
+      missed: 0, isOffline: false, roundScore: 0, showGroups: null,
+      stats: { totalPoints: 0, gamesPlayed: 0, gamesWon: 0 },
+    };
+  }
+
+  function attach(socket, room, player) {
+    socket.join(room.roomId);
+    socket.data.roomId = room.roomId;
+    socket.data.key = player.key;
+    player.sid = socket.id;
+    player.isOffline = false;
+    clearTimeout(room.cleanupTimer);
+    if (player.key === room.hostKey) clearTimeout(room.hostTimer);
+  }
+
+  function publicPlayers(room) {
+    const order = room.turnOrder.length ? room.turnOrder : [...room.players.keys()];
+    const extra = [...room.players.keys()].filter(k => !order.includes(k));
+    return [...order, ...extra].map(k => room.players.get(k)).filter(Boolean).map(p => ({
+      key: p.key, name: p.name, status: p.status, isOffline: p.isOffline,
+      cards: p.hand.length, totalPoints: p.stats.totalPoints, isHost: p.key === room.hostKey,
+    }));
+  }
+
+  function broadcastRoomState(room) {
+    toRoom(room, 'room:state_sync', {
+      roomId: room.roomId, status: room.status, hostKey: room.hostKey,
+      config: room.config, players: publicPlayers(room),
+    });
+  }
+
+  function broadcastTable(room) {
+    const act = room.status === 'PLAYING' ? activePlayer(room) : null;
+    toRoom(room, 'table:state', {
+      status: room.status, roundNo: room.roundNo, isPaused: room.isPaused,
+      activeKey: act ? act.key : null,
+      openTop: room.openPile[room.openPile.length - 1] || null,
+      closedCount: room.closedPile.length,
+      players: publicPlayers(room),
+    });
+  }
+
+  // Full state for a (re)connecting player
+  function sendSync(room, p) {
+    const dealt = p.status !== 'SPECTATOR';
+    toPlayer(p, 'game:sync', {
+      status: room.status, myStatus: p.status, isHost: p.key === room.hostKey, jokerMode: room.config.jokerMode,
+      inRound: dealt && ['PLAYING', 'SHOWING'].includes(room.status),
+      hand: dealt ? p.hand : [], phase: p.phase,
+      cutJoker: room.cutJoker && (canUseJoker(room, p) || room.status === 'ENDED') ? room.cutJoker : null,
+      unlocked: canUseJoker(room, p),
+      showing: room.status === 'SHOWING'
+        ? { winnerName: room.players.get(room.winnerKey).name, secondsLeft: Math.max(0, Math.round((room.showEndsAt - Date.now()) / 1000)), submitted: !!p.showGroups || room.winnerKey === p.key }
+        : null,
+      turn: room.status === 'PLAYING' && activePlayer(room)
+        ? { activeKey: activePlayer(room).key, secondsLeft: Math.max(0, Math.round(((room.isPaused ? room.pausedRemaining : room.turnEndsAt - Date.now())) / 1000)) }
+        : null,
+      lastResult: room.status === 'ENDED' ? room.lastResult : null,
+    });
+    broadcastTable(room);
+  }
+
+  const resolveGroups = (hand, groups) => {
+    if (!Array.isArray(groups)) return null;
+    const byId = new Map(hand.map(c => [c.id, c]));
+    const seen = new Set(), out = [];
+    for (const g of groups) {
+      if (!Array.isArray(g)) return null;
+      const arr = [];
+      for (const id of g) {
+        const c = byId.get(id);
+        if (!c || seen.has(id)) return null;
+        seen.add(id); arr.push(c);
+      }
+      if (arr.length) out.push(arr);
+    }
+    return seen.size === hand.length ? out : null;
+  };
+
+  // ---------- socket events ----------
   io.on('connection', (socket) => {
 
-    // 1. Room Creation
-    socket.on('room:create', ({ roomId, config, playerName }) => {
-      if (rooms.has(roomId)) {
-        return socket.emit('error', { message: 'Room already exists.' });
-      }
+    socket.on('room:create', (data = {}, cb) => {
+      cb = typeof cb === 'function' ? cb : () => {};
+      const name = cleanName(data.playerName), key = cleanKey(data.playerKey);
+      if (!name || !key) return cb({ ok: false, error: 'Enter your name first.' });
+      leaveRoom(socket, false);
 
+      const c = data.config || {};
       const room = {
-        roomId,
-        hostId: socket.id,
+        roomId: generateCode(), hostKey: key,
         config: {
-          maxPlayers: config.maxPlayers || 20,
-          jokerMode: config.jokerMode || 'hidden', // 'hidden' | 'open'
-          printedJokersPerDeck: config.printedJokersPerDeck || 2, // 2 | 3
-          requireFourCardSeq: config.requireFourCardSeq ?? true,
-          secondaryRankMetric: config.secondaryRankMetric || 'averagePoints', // 'averagePoints' | 'gamesPerWin'
+          maxPlayers: clamp(parseInt(c.maxPlayers, 10) || 6, 2, 6),
+          jokerMode: c.jokerMode === 'open' ? 'open' : 'hidden',
+          printedJokersPerDeck: parseInt(c.printedJokersPerDeck, 10) === 3 ? 3 : 2,
+          requireFourCardSeq: c.requireFourCardSeq !== false,
+          secondaryRankMetric: c.secondaryRankMetric === 'gamesPerWin' ? 'gamesPerWin' : 'averagePoints',
         },
-        status: 'LOBBY',
-        players: new Map(),
-        initialRoster: new Set(),
-        rosterChanged: false,
-        closedPile: [],
-        openPile: [],
-        cutJoker: null,
-        revealedPlayers: new Set(),
-        turnOrder: [],
-        activeTurnIndex: 0,
-        turnTimer: null,
-        countdownTimer: null,
-        isPaused: false,
+        status: 'LOBBY', players: new Map(), rosterChanged: false, roundNo: 0,
+        closedPile: [], openPile: [], cutJoker: null, turnOrder: [], activeTurnIndex: 0,
+        turnTimer: null, turnEndsAt: 0, pausedRemaining: 0, isPaused: false,
+        countdownTimer: null, showTimer: null, cleanupTimer: null, hostTimer: null,
+        winnerKey: null, showEndsAt: 0, lastResult: null,
       };
-
-      rooms.set(roomId, room);
-      socket.join(roomId);
-      addPlayerToRoom(room, socket, playerName);
-      broadcastRoomState(io, room);
+      rooms.set(room.roomId, room);
+      const p = newPlayer(room, key, name);
+      room.players.set(key, p);
+      attach(socket, room, p);
+      broadcastRoomState(room);
+      cb({ ok: true, roomId: room.roomId, isHost: true, name: p.name });
     });
 
-    // 2. Join / Reconnect to Room
-    socket.on('room:join', ({ roomId, playerName }) => {
+    socket.on('room:join', (data = {}, cb) => {
+      cb = typeof cb === 'function' ? cb : () => {};
+      const roomId = String(data.roomId || '').toUpperCase().trim();
+      const name = cleanName(data.playerName), key = cleanKey(data.playerKey);
       const room = rooms.get(roomId);
-      if (!room) return socket.emit('error', { message: 'Room not found.' });
+      if (!room) return cb({ ok: false, error: 'Room not found. Check the code and try again.' });
+      if (!name || !key) return cb({ ok: false, error: 'Enter your name first.' });
 
-      // Handle reconnecting player by name
-      let existingPlayer = null;
-      for (const [sId, p] of room.players.entries()) {
-        if (p.name === playerName) {
-          existingPlayer = p;
-          room.players.delete(sId);
-          room.players.set(socket.id, p);
-          p.id = socket.id;
-          p.isOffline = false;
-          break;
-        }
+      let p = room.players.get(key);
+      if (!p) {
+        if (room.players.size >= room.config.maxPlayers) return cb({ ok: false, error: 'This room is full.' });
+        leaveRoom(socket, false);
+        p = newPlayer(room, key, name);
+        room.players.set(key, p);
+        if (room.roundNo > 0) room.rosterChanged = true;
       }
+      if (p.sid && p.sid !== socket.id) io.sockets.sockets.get(p.sid)?.disconnect(true); // stale tab
+      attach(socket, room, p);
+      broadcastRoomState(room);
+      cb({ ok: true, roomId, isHost: p.key === room.hostKey, name: p.name });
+      sendSync(room, p);
+    });
 
-      socket.join(roomId);
+    socket.on('room:leave', () => leaveRoom(socket, true));
 
-      if (!existingPlayer) {
-        if (room.players.size >= room.config.maxPlayers) {
-          return socket.emit('error', { message: 'Room is full.' });
-        }
-        addPlayerToRoom(room, socket, playerName);
-        if (room.status === 'PLAYING') {
-          room.rosterChanged = true;
-        }
+    socket.on('game:trigger_start', () => {
+      const { room, player } = ctx(socket);
+      if (!room || player.key !== room.hostKey) return;
+      if (room.status === 'LOBBY') {
+        if (onlinePlayers(room).length < 2) return socket.emit('error', { message: 'You need at least 2 players to start.' });
+        room.status = 'STARTING';
+        let count = COUNTDOWN_SECONDS;
+        broadcastRoomState(room);
+        toRoom(room, 'game:countdown', { seconds: count });
+        room.countdownTimer = setInterval(() => {
+          count--;
+          toRoom(room, 'game:countdown', { seconds: count });
+          if (count <= 0) { clearInterval(room.countdownTimer); initiateRound(room); }
+        }, 1000);
       }
-
-      broadcastRoomState(io, room);
     });
 
-    // 3. Start Game (Host only or auto after countdown)
-    socket.on('game:trigger_start', ({ roomId }) => {
-      const room = rooms.get(roomId);
-      if (!room || room.hostId !== socket.id || room.status !== 'LOBBY') return;
-      if (room.players.size < 2) return socket.emit('error', { message: 'Need at least 2 players to start.' });
-
-      room.status = 'STARTING';
-      let count = 20;
-      io.to(roomId).emit('game:countdown', { seconds: count });
-
-      room.countdownTimer = setInterval(() => {
-        count--;
-        io.to(roomId).emit('game:countdown', { seconds: count });
-        if (count <= 0) {
-          clearInterval(room.countdownTimer);
-          initiateRound(io, room);
-        }
-      }, 1000);
+    socket.on('game:next_round', () => {
+      const { room, player } = ctx(socket);
+      if (!room || player.key !== room.hostKey || room.status !== 'ENDED') return;
+      if (onlinePlayers(room).length < 2) return socket.emit('error', { message: 'You need at least 2 players online for another round.' });
+      initiateRound(room);
     });
 
-    // 4. Card Draw
-    socket.on('card:draw', ({ roomId, source }) => {
-      const room = rooms.get(roomId);
-      if (!room || room.status !== 'PLAYING' || room.isPaused) return;
-
-      const player = getActivePlayer(room);
-      if (!player || player.id !== socket.id || player.phase !== 'DRAW') return;
-
-      let card;
-      if (source === 'open' && room.openPile.length > 0) {
-        card = room.openPile.pop();
-      } else {
-        if (room.closedPile.length === 0) recycleDiscardPile(room);
-        card = room.closedPile.pop();
-      }
-
-      player.hand.push(card);
-      player.phase = 'DISCARD';
-
-      socket.emit('player:hand_update', { hand: player.hand });
-      io.to(roomId).emit('table:piles_update', {
-        openTop: room.openPile[room.openPile.length - 1] || null,
-        closedCount: room.closedPile.length,
-      });
+    socket.on('card:draw', ({ source } = {}) => {
+      const { room, player } = ctx(socket);
+      if (!room || !inTurn(room, player) || player.phase !== 'DRAW') return;
+      const card = drawCard(room, player, source === 'open' ? 'open' : 'closed');
+      if (!card) return socket.emit('error', { message: 'No cards left to draw.' });
+      toPlayer(player, 'player:hand_update', { hand: player.hand, phase: player.phase, drawnId: card.id });
+      broadcastTable(room);
     });
 
-    // 5. Reveal Hidden Joker
-    socket.on('joker:reveal_req', ({ roomId, pureSequence }) => {
-      const room = rooms.get(roomId);
+    socket.on('card:discard', ({ cardId } = {}) => {
+      const { room, player } = ctx(socket);
+      if (!room || !inTurn(room, player) || player.phase !== 'DISCARD') return;
+      if (!player.hand.some(c => c.id === cardId)) return;
+      discard(room, player, cardId);
+      advanceTurn(room);
+    });
+
+    socket.on('hand:auto_sort', () => {
+      const { room, player } = ctx(socket);
+      if (!room || player.status !== 'ACTIVE' || !['PLAYING', 'SHOWING'].includes(room.status)) return;
+      const { groups } = bestArrangement(player.hand, room.cutJoker, canUseJoker(room, player), room.config.requireFourCardSeq);
+      socket.emit('hand:sorted', { groups: groups.map(g => g.map(c => c.id)) });
+    });
+
+    socket.on('joker:reveal_req', ({ cardIds } = {}) => {
+      const { room, player } = ctx(socket);
       if (!room || room.status !== 'PLAYING' || room.config.jokerMode !== 'hidden') return;
-
-      const player = room.players.get(socket.id);
-      if (!player || player.hasSeenHiddenJoker) return;
-
-      // Verify sequence is legitimately pure
-      if (!isValidPureSequence(pureSequence)) {
-        return socket.emit('error', { message: 'Invalid pure sequence.' });
+      if (player.status !== 'ACTIVE' || player.hasSeenHiddenJoker || !Array.isArray(cardIds)) return;
+      const seq = cardIds.map(id => player.hand.find(c => c.id === id));
+      if (seq.some(c => !c) || new Set(cardIds).size !== cardIds.length || !isValidPureSequence(seq)) {
+        return socket.emit('error', { message: 'That is not a valid pure sequence in your hand.' });
       }
-
       player.hasSeenHiddenJoker = true;
-      room.revealedPlayers.add(socket.id);
-
-      // Private reveal to player
-      socket.emit('joker:revealed_private', { cutJoker: room.cutJoker });
-
-      // Temporary 5-second public broadcast of the sequence to all players
-      io.to(roomId).emit('joker:sequence_broadcast', {
-        playerName: player.name,
-        sequence: pureSequence,
-        durationSeconds: 5,
-      });
-
-      // If all active non-eliminated players have seen the cut joker, open it permanently
-      const activePlayers = [...room.players.values()].filter(p => !p.isEliminated && !p.hasFolded);
-      if (activePlayers.every(p => p.hasSeenHiddenJoker)) {
-        io.to(roomId).emit('joker:revealed_global', { cutJoker: room.cutJoker });
+      toPlayer(player, 'joker:revealed_private', { cutJoker: room.cutJoker });
+      toRoom(room, 'joker:sequence_broadcast', { playerName: player.name, sequence: seq, durationSeconds: 5 });
+      if (active(room).every(p => p.hasSeenHiddenJoker)) {
+        toRoom(room, 'joker:revealed_global', { cutJoker: room.cutJoker });
       }
     });
 
-    // 6. Card Discard
-    socket.on('card:discard', ({ roomId, cardId }) => {
-      const room = rooms.get(roomId);
-      if (!room || room.status !== 'PLAYING' || room.isPaused) return;
+    // Finish: discard one card face-down, arrange the remaining 13 into groups.
+    socket.on('round:declare', ({ groups, finishCardId } = {}) => {
+      const { room, player } = ctx(socket);
+      if (!room || !inTurn(room, player) || player.phase !== 'DISCARD') return;
+      const idx = player.hand.findIndex(c => c.id === finishCardId);
+      if (idx < 0) return socket.emit('error', { message: 'Pick the card you want to finish with.' });
+      const rest = player.hand.filter((_, i) => i !== idx);
+      const resolved = resolveGroups(rest, groups);
+      if (!resolved) return socket.emit('error', { message: 'Your groups are out of sync. Try again.' });
 
-      const player = getActivePlayer(room);
-      if (!player || player.id !== socket.id || player.phase !== 'DISCARD') return;
-
-      const cardIndex = player.hand.findIndex(c => c.id === cardId);
-      if (cardIndex === -1) return;
-
-      const [discarded] = player.hand.splice(cardIndex, 1);
-      room.openPile.push(discarded);
-      player.phase = 'WAIT';
-      player.consecutiveMissedTurns = 0; // reset inactivity streak
-
-      socket.emit('player:hand_update', { hand: player.hand });
-      io.to(roomId).emit('table:piles_update', {
-        openTop: discarded,
-        closedCount: room.closedPile.length,
-      });
-
-      advanceTurn(io, room);
-    });
-
-    // 7. Auto-Sort Hand
-    socket.on('hand:auto_sort', ({ roomId }) => {
-      const room = rooms.get(roomId);
-      const player = room?.players.get(socket.id);
-      if (!player) return;
-
-      const canUseCutJoker = room.config.jokerMode === 'open' || player.hasSeenHiddenJoker;
-      const sortedGroups = autoSortHand(
-        player.hand,
-        room.cutJoker,
-        canUseCutJoker,
-        room.config.requireFourCardSeq
-      );
-
-      socket.emit('hand:sorted', { groups: sortedGroups });
-    });
-
-    // 8. Player Declaration
-    socket.on('round:declare', ({ roomId, groupedMelds }) => {
-      const room = rooms.get(roomId);
-      if (!room || room.status !== 'PLAYING') return;
-
-      const player = getActivePlayer(room);
-      if (!player || player.id !== socket.id) return;
-
-      const isValid = validateDeclaration(
-        groupedMelds,
-        room.cutJoker,
-        room.config.requireFourCardSeq
-      );
-
-      if (isValid) {
-        // Player wins round with 0 deadwood points
-        player.stats.gamesWon++;
-        concludeRound(io, room, player.id);
+      clearTimeout(room.turnTimer);
+      if (validateDeclaration(resolved, room.cutJoker, room.config.requireFourCardSeq, true)) {
+        player.hand = rest;
+        player.phase = 'WAIT';
+        player.showGroups = resolved;
+        toPlayer(player, 'player:hand_update', { hand: player.hand, phase: 'WAIT' });
+        startShow(room, player);
       } else {
-        // False declaration: penalty 80 points and immediate round knockout
-        player.isEliminated = true;
-        player.roundScore = 80;
-        player.stats.totalPoints += 80;
-        socket.emit('declaration:result', { success: false, points: 80 });
-        io.to(roomId).emit('player:knocked_out', { playerId: player.id, name: player.name });
-
-        const remainingActive = [...room.players.values()].filter(p => !p.isEliminated && !p.hasFolded);
-        if (remainingActive.length <= 1) {
-          concludeRound(io, room, remainingActive[0]?.id || null);
-        } else {
-          advanceTurn(io, room);
-        }
+        // Invalid declaration: 80 points and out of this round
+        player.status = 'OUT';
+        player.phase = 'WAIT';
+        player.roundScore = MAX_POINTS;
+        player.stats.totalPoints += MAX_POINTS;
+        toPlayer(player, 'declaration:result', { success: false, points: MAX_POINTS });
+        toRoom(room, 'player:knocked_out', { key: player.key, name: player.name });
+        afterPlayerLeavesRound(room, player);
       }
     });
 
-    // 9. Drop / Fold
-    socket.on('round:drop', ({ roomId }) => {
-      const room = rooms.get(roomId);
-      if (!room || room.status !== 'PLAYING') return;
-
-      const player = room.players.get(socket.id);
-      if (!player || player.hasFolded || player.isEliminated) return;
-
-      const penalty = player.turnsPlayed === 0 ? 20 : 40;
-      player.hasFolded = true;
-      player.roundScore = penalty;
-      player.stats.totalPoints += penalty;
-
-      io.to(roomId).emit('player:dropped', { playerId: player.id, name: player.name, penalty });
-
-      const remainingActive = [...room.players.values()].filter(p => !p.isEliminated && !p.hasFolded);
-      if (remainingActive.length <= 1) {
-        concludeRound(io, room, remainingActive[0]?.id || null);
-      } else if (getActivePlayer(room)?.id === socket.id) {
-        advanceTurn(io, room);
-      }
+    socket.on('round:submit_show', ({ groups } = {}) => {
+      const { room, player } = ctx(socket);
+      if (!room || room.status !== 'SHOWING' || player.status !== 'ACTIVE' || player.key === room.winnerKey) return;
+      const resolved = resolveGroups(player.hand, groups);
+      if (!resolved) return socket.emit('error', { message: 'Your groups are out of sync. Auto-grouping will be used.' });
+      player.showGroups = resolved;
+      checkShowComplete(room);
     });
 
-    // 10. Pause / Resume Toggle
-    socket.on('game:toggle_pause', ({ roomId }) => {
-      const room = rooms.get(roomId);
-      if (!room || room.status !== 'PLAYING') return;
+    socket.on('round:drop', () => {
+      const { room, player } = ctx(socket);
+      if (!room || !inTurn(room, player) || player.phase !== 'DRAW') return;
+      dropPlayer(room, player, player.turnsPlayed === 0 ? FIRST_DROP : MIDDLE_DROP);
+    });
 
+    socket.on('game:toggle_pause', () => {
+      const { room, player } = ctx(socket);
+      if (!room || player.key !== room.hostKey || room.status !== 'PLAYING') return;
       room.isPaused = !room.isPaused;
-      io.to(roomId).emit('game:pause_state', { isPaused: room.isPaused, toggledBy: socket.id });
+      if (room.isPaused) {
+        room.pausedRemaining = Math.max(1000, room.turnEndsAt - Date.now());
+        clearTimeout(room.turnTimer);
+      } else {
+        armTurnTimer(room, room.pausedRemaining / 1000);
+        toRoom(room, 'turn:start', { activeKey: activePlayer(room).key, durationSeconds: Math.ceil(room.pausedRemaining / 1000), isReduced: false, resumed: true });
+      }
+      toRoom(room, 'game:pause_state', { isPaused: room.isPaused });
+      broadcastTable(room);
     });
 
-    // 11. Rejoin from Inactive / Reduced-Time State
-    socket.on('player:resume_active', ({ roomId }) => {
-      const room = rooms.get(roomId);
-      const player = room?.players.get(socket.id);
+    socket.on('player:resume_active', () => {
+      const { player } = ctx(socket);
       if (!player) return;
-
-      player.consecutiveMissedTurns = 0;
+      player.missed = 0;
       socket.emit('player:resumed');
     });
 
-    // 12. Disconnect Handler
     socket.on('disconnect', () => {
-      for (const room of rooms.values()) {
-        const player = room.players.get(socket.id);
-        if (player) {
-          player.isOffline = true;
-          room.rosterChanged = true;
-          if (room.status === 'PLAYING' && getActivePlayer(room)?.id === socket.id) {
-            triggerAutoPlay(io, room);
-          }
-          break;
-        }
+      const { room, player } = ctx(socket);
+      if (!room) return;
+      player.isOffline = true;
+      player.sid = null;
+
+      if (room.hostKey === player.key) {
+        // Grace period so a page refresh or brief network drop doesn't cost the host their role
+        clearTimeout(room.hostTimer);
+        room.hostTimer = setTimeout(() => {
+          const host = room.players.get(room.hostKey);
+          if (host && host.isOffline) { transferHost(room); broadcastRoomState(room); broadcastTable(room); }
+        }, 30000);
+      }
+      if (room.status === 'PLAYING' && activePlayer(room) === player && !room.isPaused) {
+        armTurnTimer(room, OFFLINE_SECONDS); // don't make the table wait for someone who left
+      }
+      if (room.status === 'SHOWING') checkShowComplete(room);
+      broadcastRoomState(room);
+      broadcastTable(room);
+      if (!onlinePlayers(room).length) {
+        room.cleanupTimer = setTimeout(() => destroyRoom(room), 10 * 60 * 1000);
       }
     });
-
-  });
-}
-
-// --- Lifecycle & Turn Mechanics ---
-
-function addPlayerToRoom(room, socket, playerName) {
-  const newPlayer = {
-    id: socket.id,
-    name: playerName || `Player ${room.players.size + 1}`,
-    hand: [],
-    turnsPlayed: 0,
-    phase: 'WAIT',
-    isEliminated: false,
-    hasFolded: false,
-    hasSeenHiddenJoker: false,
-    consecutiveMissedTurns: 0,
-    isOffline: false,
-    roundScore: 0,
-    stats: {
-      totalPoints: 0,
-      gamesPlayed: 0,
-      gamesWon: 0,
-    },
-  };
-  room.players.set(socket.id, newPlayer);
-  room.initialRoster.add(socket.id);
-}
-
-function initiateRound(io, room) {
-  room.status = 'PLAYING';
-  room.revealedPlayers.clear();
-
-  // Create cards dynamically using deck builder
-  const deckInstance = new Deck(room.players.size, room.config.printedJokersPerDeck);
-  room.closedPile = deckInstance.cards;
-
-  // Extract cut joker
-  room.cutJoker = room.closedPile.pop();
-
-  // Deal 13 cards to each player
-  for (const player of room.players.values()) {
-    player.hand = room.closedPile.splice(0, 13);
-    player.isEliminated = false;
-    player.hasFolded = false;
-    player.turnsPlayed = 0;
-    player.hasSeenHiddenJoker = room.config.jokerMode === 'open';
-    player.stats.gamesPlayed++;
-  }
-
-  // First card to start discard pile
-  room.openPile = [room.closedPile.pop()];
-  room.turnOrder = [...room.players.keys()];
-  room.activeTurnIndex = 0;
-
-  // Distribute hands privately
-  for (const [sId, player] of room.players.entries()) {
-    io.to(sId).emit('round:start_hands', {
-      hand: player.hand,
-      cutJoker: room.config.jokerMode === 'open' ? room.cutJoker : null,
-      jokerMode: room.config.jokerMode,
-    });
-  }
-
-  io.to(room.roomId).emit('table:piles_update', {
-    openTop: room.openPile[0],
-    closedCount: room.closedPile.length,
   });
 
-  startPlayerTurn(io, room);
-}
+  // ---------- room lifecycle ----------
+  const onlinePlayers = room => [...room.players.values()].filter(p => !p.isOffline);
 
-function startPlayerTurn(io, room) {
-  clearTimeout(room.turnTimer);
-
-  const player = getActivePlayer(room);
-  if (!player || player.isEliminated || player.hasFolded) {
-    return advanceTurn(io, room);
+  function transferHost(room) {
+    const next = onlinePlayers(room).find(p => p.key !== room.hostKey);
+    if (next) room.hostKey = next.key;
   }
 
-  player.phase = 'DRAW';
-  player.turnsPlayed++;
-
-  // Determine turn length based on inactivity
-  let turnSeconds = 30;
-  if (player.consecutiveMissedTurns >= 3 || player.isOffline) {
-    turnSeconds = 3;
-  } else if (player.consecutiveMissedTurns > 0) {
-    turnSeconds = 10;
+  function destroyRoom(room) {
+    clearTimeout(room.turnTimer); clearTimeout(room.showTimer);
+    clearInterval(room.countdownTimer); clearTimeout(room.cleanupTimer); clearTimeout(room.hostTimer);
+    rooms.delete(room.roomId);
   }
 
-  // Broadcast turn start; active player receives flashBorder flag
-  io.to(room.roomId).emit('turn:start', {
-    activePlayerId: player.id,
-    durationSeconds: turnSeconds,
-    isReduced: turnSeconds < 30,
-  });
+  function leaveRoom(socket, explicit) {
+    const { room, player } = ctx(socket);
+    if (!room) return;
+    socket.leave(room.roomId);
+    socket.data.roomId = null;
+    socket.data.key = null;
+    player.sid = null;
+    player.isOffline = true;
 
-  room.turnTimer = setTimeout(() => {
-    player.consecutiveMissedTurns++;
-    triggerAutoPlay(io, room);
-  }, turnSeconds * 1000);
-}
-
-function triggerAutoPlay(io, room) {
-  const player = getActivePlayer(room);
-  if (!player || player.phase === 'WAIT') return;
-
-  // Auto-draw from closed stock pile
-  if (player.phase === 'DRAW') {
-    if (room.closedPile.length === 0) recycleDiscardPile(room);
-    const card = room.closedPile.pop();
-    player.hand.push(card);
-  }
-
-  // Auto-discard drawn or top card directly to open pile
-  const discarded = player.hand.pop();
-  room.openPile.push(discarded);
-  player.phase = 'WAIT';
-
-  io.to(player.id).emit('player:hand_update', { hand: player.hand });
-  io.to(room.roomId).emit('table:piles_update', {
-    openTop: discarded,
-    closedCount: room.closedPile.length,
-  });
-
-  advanceTurn(io, room);
-}
-
-function advanceTurn(io, room) {
-  clearTimeout(room.turnTimer);
-  room.activeTurnIndex = (room.activeTurnIndex + 1) % room.turnOrder.length;
-  startPlayerTurn(io, room);
-}
-
-function recycleDiscardPile(room) {
-  if (room.openPile.length <= 1) return;
-  const topCard = room.openPile.pop();
-  room.closedPile = room.openPile.reverse();
-  room.openPile = [topCard];
-}
-
-function concludeRound(io, room, winnerId) {
-  clearTimeout(room.turnTimer);
-  room.status = 'ENDED';
-
-  // Compute deadwood penalty for all other players
-  const playerRows = [];
-  for (const player of room.players.values()) {
-    if (player.id === winnerId) {
-      player.roundScore = 0;
-    } else if (!player.isEliminated && !player.hasFolded) {
-      const sorted = autoSortHand(
-        player.hand,
-        room.cutJoker,
-        room.config.jokerMode === 'open' || player.hasSeenHiddenJoker,
-        room.config.requireFourCardSeq
-      );
-      const points = calculateHandPoints(
-        sorted,
-        room.cutJoker,
-        room.config.jokerMode === 'open' || player.hasSeenHiddenJoker,
-        room.config.requireFourCardSeq
-      );
-      player.roundScore = points;
-      player.stats.totalPoints += points;
+    if (room.status === 'PLAYING' && player.status === 'ACTIVE') {
+      if (activePlayer(room) === player && player.phase === 'DISCARD') {
+        // already drew: put the drawn card back on the open pile, then drop
+        discardSilently(room, player);
+      }
+      dropPlayer(room, player, player.turnsPlayed === 0 ? FIRST_DROP : MIDDLE_DROP);
+    } else if (room.status === 'SHOWING') {
+      checkShowComplete(room);
     }
-
-    const avg = player.stats.gamesPlayed > 0
-      ? (player.stats.totalPoints / player.stats.gamesPlayed).toFixed(2)
-      : '0.00';
-    const gpw = player.stats.gamesWon > 0
-      ? (player.stats.gamesPlayed / player.stats.gamesWon).toFixed(2)
-      : 'N/A';
-
-    playerRows.push({
-      id: player.id,
-      name: player.name,
-      totalPoints: player.stats.totalPoints,
-      averagePoints: parseFloat(avg),
-      gamesPlayed: player.stats.gamesPlayed,
-      gamesWon: player.stats.gamesWon,
-      gamesPerWin: gpw,
-    });
+    if (['LOBBY', 'ENDED'].includes(room.status) || player.status === 'SPECTATOR') {
+      room.players.delete(player.key);
+      if (room.roundNo > 0) room.rosterChanged = true;
+    }
+    if (room.hostKey === player.key) transferHost(room);
+    if (!room.players.size || (explicit && !onlinePlayers(room).length)) return destroyRoom(room);
+    broadcastRoomState(room);
+    broadcastTable(room);
   }
 
-  // Dynamic ranking logic
-  if (!room.rosterChanged) {
-    // Stable roster: sort by total points ascending
-    playerRows.sort((a, b) => a.totalPoints - b.totalPoints);
-  } else {
-    // Roster changed: sort by configured metric
-    if (room.config.secondaryRankMetric === 'gamesPerWin') {
-      playerRows.sort((a, b) => {
-        const valA = a.gamesPerWin === 'N/A' ? Infinity : parseFloat(a.gamesPerWin);
-        const valB = b.gamesPerWin === 'N/A' ? Infinity : parseFloat(b.gamesPerWin);
-        return valA - valB;
+  function initiateRound(room) {
+    // Players who left between rounds are removed
+    for (const [k, p] of room.players) if (p.isOffline) { room.players.delete(k); room.rosterChanged = true; }
+    if (room.players.size < 2) {
+      room.status = room.roundNo ? 'ENDED' : 'LOBBY';
+      broadcastRoomState(room);
+      return toRoom(room, 'error', { message: 'Not enough players to start.' });
+    }
+    if (!room.players.has(room.hostKey)) room.hostKey = [...room.players.keys()][0];
+
+    room.status = 'PLAYING';
+    room.roundNo++;
+    room.isPaused = false;
+    room.winnerKey = null;
+    room.lastResult = null;
+
+    const order = [...room.players.keys()];
+    const first = (room.roundNo - 1) % order.length;   // deal / first turn rotates
+    room.turnOrder = order.slice(first).concat(order.slice(0, first));
+    room.activeTurnIndex = 0;
+
+    const deck = new Deck(order.length, room.config.printedJokersPerDeck);
+    room.closedPile = deck.cards;
+    // The cut joker must be a normal card, never a printed joker
+    const cutIdx = room.closedPile.findIndex(c => !c.isPrintedJoker);
+    room.cutJoker = room.closedPile.splice(cutIdx, 1)[0];
+
+    for (const p of room.players.values()) {
+      p.hand = room.closedPile.splice(0, 13);
+      p.status = 'ACTIVE'; p.phase = 'WAIT'; p.turnsPlayed = 0; p.missed = 0;
+      p.lastDrawnId = null; p.roundScore = 0; p.showGroups = null;
+      p.hasSeenHiddenJoker = room.config.jokerMode === 'open';
+      p.stats.gamesPlayed++;
+    }
+    room.openPile = [room.closedPile.pop()];
+
+    for (const p of room.players.values()) {
+      toPlayer(p, 'round:start_hands', {
+        hand: p.hand, jokerMode: room.config.jokerMode,
+        cutJoker: room.config.jokerMode === 'open' ? room.cutJoker : null,
+        roundNo: room.roundNo,
       });
-    } else {
-      playerRows.sort((a, b) => a.averagePoints - b.averagePoints);
     }
+    broadcastRoomState(room);
+    startPlayerTurn(room);
   }
 
-  io.to(room.roomId).emit('round:ended', {
-    winnerId,
-    cutJoker: room.cutJoker,
-    leaderboard: playerRows,
-  });
+  // ---------- turns ----------
+  function armTurnTimer(room, seconds) {
+    clearTimeout(room.turnTimer);
+    room.turnEndsAt = Date.now() + seconds * 1000;
+    room.turnTimer = setTimeout(() => onTurnTimeout(room), seconds * 1000);
+  }
+
+  function startPlayerTurn(room) {
+    clearTimeout(room.turnTimer);
+    let p = activePlayer(room), guard = 0;
+    while ((!p || p.status !== 'ACTIVE') && guard++ < room.turnOrder.length) {
+      room.activeTurnIndex = (room.activeTurnIndex + 1) % room.turnOrder.length;
+      p = activePlayer(room);
+    }
+    if (!p || p.status !== 'ACTIVE') return concludeRound(room, null);
+
+    p.phase = 'DRAW';
+    p.lastDrawnId = null;
+    const seconds = p.isOffline ? OFFLINE_SECONDS : p.missed > 0 ? REDUCED_SECONDS : TURN_SECONDS;
+    armTurnTimer(room, seconds);
+    toRoom(room, 'turn:start', { activeKey: p.key, durationSeconds: seconds, isReduced: seconds < TURN_SECONDS });
+    broadcastTable(room);
+  }
+
+  function advanceTurn(room) {
+    clearTimeout(room.turnTimer);
+    room.activeTurnIndex = (room.activeTurnIndex + 1) % room.turnOrder.length;
+    startPlayerTurn(room);
+  }
+
+  function recycleDiscardPile(room) {
+    if (room.openPile.length <= 1) return;
+    const top = room.openPile.pop();
+    room.closedPile = Deck.shuffle(room.openPile);
+    room.openPile = [top];
+  }
+
+  function drawCard(room, p, source) {
+    let card;
+    if (source === 'open' && room.openPile.length > 0) card = room.openPile.pop();
+    else {
+      if (room.closedPile.length === 0) recycleDiscardPile(room);
+      card = room.closedPile.pop() || (room.openPile.length > 1 ? room.openPile.pop() : null);
+    }
+    if (!card) return null;
+    p.hand.push(card);
+    p.lastDrawnId = card.id;
+    p.phase = 'DISCARD';
+    return card;
+  }
+
+  function discard(room, p, cardId) {
+    const i = p.hand.findIndex(c => c.id === cardId);
+    room.openPile.push(p.hand.splice(i, 1)[0]);
+    p.phase = 'WAIT';
+    p.turnsPlayed++;
+    p.missed = 0;
+    toPlayer(p, 'player:hand_update', { hand: p.hand, phase: 'WAIT' });
+    broadcastTable(room);
+  }
+
+  function discardSilently(room, p) {
+    const id = p.lastDrawnId || p.hand[p.hand.length - 1].id;
+    const i = p.hand.findIndex(c => c.id === id);
+    if (i >= 0) room.openPile.push(p.hand.splice(i, 1)[0]);
+    p.phase = 'WAIT';
+  }
+
+  function onTurnTimeout(room) {
+    if (room.status !== 'PLAYING' || room.isPaused) return;
+    const p = activePlayer(room);
+    if (!p) return;
+    p.missed++;
+    if (p.missed >= MAX_MISSED_TURNS) {
+      if (p.phase === 'DISCARD') discardSilently(room, p);
+      return dropPlayer(room, p, p.turnsPlayed === 0 ? FIRST_DROP : MIDDLE_DROP, true);
+    }
+    // Auto play: draw from the closed pile and throw the drawn card back
+    if (p.phase === 'DRAW' && !drawCard(room, p, 'closed')) return advanceTurn(room);
+    const id = p.lastDrawnId || p.hand[p.hand.length - 1].id;
+    const missed = p.missed;
+    discard(room, p, id);
+    p.missed = missed;   // auto-play must not clear the inactivity streak
+    advanceTurn(room);
+  }
+
+  function dropPlayer(room, p, penalty, auto = false) {
+    if (p.status !== 'ACTIVE') return;
+    const wasTurn = room.status === 'PLAYING' && activePlayer(room) === p;
+    p.status = 'DROPPED';
+    p.phase = 'WAIT';
+    p.roundScore = penalty;
+    p.stats.totalPoints += penalty;
+    toRoom(room, 'player:dropped', { key: p.key, name: p.name, penalty, auto });
+    afterPlayerLeavesRound(room, p, wasTurn);
+  }
+
+  function afterPlayerLeavesRound(room, p, wasTurn = true) {
+    const left = active(room);
+    if (left.length <= 1) return concludeRound(room, left[0] ? left[0].key : null);
+    if (room.status === 'PLAYING' && wasTurn) advanceTurn(room);
+    else broadcastTable(room);
+  }
+
+  // ---------- show & scoring ----------
+  function startShow(room, winner) {
+    room.status = 'SHOWING';
+    room.winnerKey = winner.key;
+    room.showEndsAt = Date.now() + SHOW_SECONDS * 1000;
+    clearTimeout(room.turnTimer);
+    toRoom(room, 'round:show_started', { winnerName: winner.name, seconds: SHOW_SECONDS });
+    broadcastTable(room);
+    room.showTimer = setTimeout(() => concludeRound(room, winner.key), (SHOW_SECONDS + 2) * 1000);
+    checkShowComplete(room);
+  }
+
+  function checkShowComplete(room) {
+    if (room.status !== 'SHOWING') return;
+    const waiting = active(room).filter(p => p.key !== room.winnerKey && !p.isOffline && !p.showGroups);
+    if (!waiting.length) concludeRound(room, room.winnerKey);
+  }
+
+  function concludeRound(room, winnerKey) {
+    if (room.status === 'ENDED') return;
+    clearTimeout(room.turnTimer); clearTimeout(room.showTimer);
+    room.status = 'ENDED';
+    room.isPaused = false;
+
+    const results = [];
+    for (const p of room.players.values()) {
+      if (p.status === 'SPECTATOR') continue;
+      let groups = null;
+      const isWinner = p.key === winnerKey;
+      if (isWinner) {
+        p.roundScore = 0;
+        p.stats.gamesWon++;
+        groups = p.showGroups;
+      } else if (p.status === 'ACTIVE') {
+        const unlocked = canUseJoker(room, p);
+        groups = p.showGroups || bestArrangement(p.hand, room.cutJoker, unlocked, room.config.requireFourCardSeq).groups;
+        p.roundScore = calculateHandPoints(groups, room.cutJoker, unlocked, room.config.requireFourCardSeq);
+        p.stats.totalPoints += p.roundScore;
+      }
+      results.push({
+        key: p.key, name: p.name, status: isWinner ? 'WINNER' : p.status,
+        roundScore: p.roundScore, groups,
+      });
+    }
+
+    const rows = [...room.players.values()].map(p => {
+      const g = p.stats.gamesPlayed;
+      return {
+        key: p.key, name: p.name, totalPoints: p.stats.totalPoints,
+        averagePoints: g ? +(p.stats.totalPoints / g).toFixed(2) : 0,
+        gamesPlayed: g, gamesWon: p.stats.gamesWon,
+        gamesPerWin: p.stats.gamesWon ? +(g / p.stats.gamesWon).toFixed(2) : 'N/A',
+      };
+    });
+    // Stable roster: lowest total wins. Roster changed: compare on the room's chosen metric.
+    if (!room.rosterChanged) rows.sort((a, b) => a.totalPoints - b.totalPoints);
+    else if (room.config.secondaryRankMetric === 'gamesPerWin') {
+      const v = r => (r.gamesPerWin === 'N/A' ? Infinity : r.gamesPerWin);
+      rows.sort((a, b) => v(a) - v(b));
+    } else rows.sort((a, b) => a.averagePoints - b.averagePoints);
+
+    const winner = winnerKey ? room.players.get(winnerKey) : null;
+    room.lastResult = {
+      winnerKey, winnerName: winner ? winner.name : null, cutJoker: room.cutJoker,
+      results, leaderboard: rows,
+      rankedBy: room.rosterChanged ? room.config.secondaryRankMetric : 'totalPoints',
+    };
+    toRoom(room, 'round:ended', room.lastResult);
+    broadcastRoomState(room);
+    broadcastTable(room);
+  }
 }
 
-function getActivePlayer(room) {
-  const socketId = room.turnOrder[room.activeTurnIndex];
-  return room.players.get(socketId);
-}
-
-function broadcastRoomState(io, room) {
-  io.to(room.roomId).emit('room:state_sync', {
-    roomId: room.roomId,
-    status: room.status,
-    players: [...room.players.values()].map(p => ({
-      id: p.id,
-      name: p.name,
-      isOffline: p.isOffline,
-    })),
-    config: room.config,
-  });
-}
-
-module.exports = { registerSocketHandlers };
+module.exports = { registerSocketHandlers, _rooms: rooms };
