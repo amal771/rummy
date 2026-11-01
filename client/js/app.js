@@ -226,6 +226,7 @@ function renderTable(t) {
   const open = $('top-open-card');
   open.replaceWith(Object.assign(makeCard(t.openTop), { id: 'top-open-card' }));
   $('btn-pause-toggle').classList.toggle('hidden', !(S.isHost && t.status === 'PLAYING'));
+  closeMenu();
   $('btn-pause-toggle').textContent = t.isPaused ? 'Resume' : 'Pause';
 
   const seats = $('seats');
@@ -629,7 +630,44 @@ $('btn-declare').addEventListener('click', () => {
   socket.emit('round:declare', { groups, finishCardId });
 });
 
-$('btn-pause-toggle').addEventListener('click', () => socket.emit('game:toggle_pause'));
+$('btn-pause-toggle').addEventListener('click', () => { closeMenu(); socket.emit('game:toggle_pause'); });
+
+// ---------- menu & full screen ----------
+function closeMenu() { $('menu-panel').classList.add('hidden'); $('btn-menu').setAttribute('aria-expanded', 'false'); }
+$('btn-menu').addEventListener('click', e => {
+  e.stopPropagation();
+  const open = $('menu-panel').classList.toggle('hidden') === false;
+  $('btn-menu').setAttribute('aria-expanded', String(open));
+});
+document.addEventListener('click', e => { if (!e.target.closest('.menu-wrap')) closeMenu(); });
+
+const fsRoot = document.documentElement;
+const fsRequest = fsRoot.requestFullscreen || fsRoot.webkitRequestFullscreen;
+const fsExit = document.exitFullscreen || document.webkitExitFullscreen;
+const inFullscreen = () => !!(document.fullscreenElement || document.webkitFullscreenElement);
+async function toggleFullscreen() {
+  closeMenu();
+  if (!fsRequest) {
+    toast('This browser cannot go full screen. On iPhone, tap Share, then Add to Home Screen, and open Rummy from there.', false, 8000);
+    return;
+  }
+  try {
+    if (inFullscreen()) await fsExit.call(document);
+    else {
+      await fsRequest.call(fsRoot);
+      try { await screen.orientation.lock('landscape'); } catch (_) { /* not supported: fine */ }
+    }
+  } catch (_) { toast('The browser blocked full screen. Try again.', true); }
+}
+function syncFullscreenLabels() {
+  const label = inFullscreen() ? 'Exit full screen' : 'Full screen';
+  $('btn-fullscreen').textContent = label;
+  $('btn-fullscreen-lobby').textContent = label;
+}
+$('btn-fullscreen').addEventListener('click', toggleFullscreen);
+$('btn-fullscreen-lobby').addEventListener('click', toggleFullscreen);
+document.addEventListener('fullscreenchange', syncFullscreenLabels);
+document.addEventListener('webkitfullscreenchange', syncFullscreenLabels);
 $('btn-rejoin-active').addEventListener('click', () => {
   socket.emit('player:resume_active');
   $('rejoin-modal').classList.add('hidden');
