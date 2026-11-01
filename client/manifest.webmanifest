@@ -1,0 +1,9 @@
+{
+  "name": "Online Rummy",
+  "short_name": "Rummy",
+  "start_url": "/",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#072620",
+  "theme_color": "#072620"
+}
