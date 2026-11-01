@@ -1,6 +1,6 @@
 # Online Rummy
 
-Multiplayer 13-card Indian Rummy (2–6 players) built with Node, Express and Socket.IO.
+Multiplayer 13-card Indian Rummy (2–20 players) built with Node, Express and Socket.IO.
 
 ```bash
 npm install
@@ -10,7 +10,7 @@ npm test           # rules + full multiplayer flow tests
 
 ## Rules implemented
 
-- 13 cards each; draw (closed or open pile) then discard. One pack for 2 players, two packs for 3+.
+- 13 cards each; draw (closed or open pile) then discard. One pack for 2 players, two for 3–8, more packs as the table grows (up to 20 players).
 - Wild jokers: printed jokers plus every card of the cut-joker rank. A room can use an **open** cut joker, or a
   **hidden** one unlocked by showing a pure sequence.
 - Valid declaration: all 13 cards in valid groups, at least two sequences, at least one pure. Optional room rule: a 4-card sequence.
