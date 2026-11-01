@@ -5,12 +5,13 @@ const { isValidPureSequence } = require('./logic/validator');
 
 const rooms = new Map(); // roomId -> room
 
-const TURN_SECONDS = 30;
+const TURN_SECONDS = 45;
 const REDUCED_SECONDS = 10;
 const OFFLINE_SECONDS = 3;
 const MAX_MISSED_TURNS = 3;   // auto-drop after this many missed turns in a row
 const COUNTDOWN_SECONDS = Number(process.env.RUMMY_COUNTDOWN) || 10;
 const SHOW_SECONDS = Number(process.env.RUMMY_SHOW) || 45;
+const MAX_PLAYERS = 20;
 const FIRST_DROP = 20;
 const MIDDLE_DROP = 40;
 const MAX_POINTS = 80;
@@ -144,7 +145,7 @@ function registerSocketHandlers(io) {
       const room = {
         roomId: generateCode(), hostKey: key,
         config: {
-          maxPlayers: clamp(parseInt(c.maxPlayers, 10) || 6, 2, 6),
+          maxPlayers: clamp(parseInt(c.maxPlayers, 10) || MAX_PLAYERS, 2, MAX_PLAYERS),
           jokerMode: c.jokerMode === 'open' ? 'open' : 'hidden',
           printedJokersPerDeck: parseInt(c.printedJokersPerDeck, 10) === 3 ? 3 : 2,
           requireFourCardSeq: c.requireFourCardSeq !== false,
