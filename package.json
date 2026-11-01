@@ -1,0 +1,20 @@
+{
+  "name": "rummy-online",
+  "version": "1.0.0",
+  "description": "Multiplayer online rummy web game with custom room rules, hidden jokers, and live leaderboards",
+  "main": "server/server.js",
+  "scripts": {
+    "start": "node server/server.js",
+    "dev": "nodemon server/server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
