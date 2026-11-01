@@ -2,184 +2,210 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Online Rummy</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;700&family=Fraunces:opsz,wght@9..144,600;9..144,800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="css/style.css">
-  <!-- QRCode generator library -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
   <script src="/socket.io/socket.io.js"></script>
+  <script src="/shared/rules.js"></script>
 </head>
 <body>
-
-  <!-- Full-screen fluorescent green pulse border on active turn -->
   <div id="turn-border-flash" class="turn-border hidden"></div>
+  <div id="toast" class="toast hidden" role="status"></div>
 
-  <!-- MAIN LOBBY SCREEN (Default on site visit) -->
+  <!-- LOBBY -->
   <div id="main-lobby-screen" class="lobby-container">
     <div class="lobby-card">
-      <h1 class="lobby-title">♠ ONLINE RUMMY ♥</h1>
-      
-      <!-- Player Profile Section -->
+      <h1 class="lobby-title">Rummy</h1>
+      <p class="lobby-sub">13-card Indian Rummy for 2–6 players</p>
+
       <div class="form-group">
-        <label for="input-player-name">Player Name:</label>
-        <input type="text" id="input-player-name" placeholder="Enter your name" maxlength="15">
+        <label for="input-player-name">Your name</label>
+        <input type="text" id="input-player-name" placeholder="Enter your name" maxlength="15" autocomplete="nickname">
       </div>
 
-      <div class="lobby-actions-grid">
-        <!-- Join Room Box -->
-        <div class="lobby-panel">
-          <h3>Join Existing Room</h3>
-          <div class="form-group">
-            <label for="input-join-code">Room Code (3-4 Letters):</label>
-            <input type="text" id="input-join-code" placeholder="e.g. ABCD" maxlength="4" style="text-transform: uppercase;">
+      <div id="lobby-forms">
+        <div class="lobby-actions-grid">
+          <div class="lobby-panel">
+            <h3>Join a room</h3>
+            <div class="form-group">
+              <label for="input-join-code">Room code</label>
+              <input type="text" id="input-join-code" placeholder="ABCD" maxlength="4" autocapitalize="characters">
+            </div>
+            <button id="btn-join-room" class="btn primary-btn btn-block">Join room</button>
           </div>
-          <button id="btn-join-room" class="btn primary-btn btn-block">Join Room</button>
-        </div>
 
-        <!-- Create Room Box -->
-        <div class="lobby-panel">
-          <h3>Create New Room</h3>
-          <div class="form-group">
-            <label>Joker Style:</label>
-            <select id="select-joker-mode">
-              <option value="hidden" selected>Hidden Joker (Reveal Pure Run)</option>
-              <option value="open">Open Cut Joker</option>
-            </select>
+          <div class="lobby-panel">
+            <h3>Create a room</h3>
+            <div class="form-group">
+              <label for="select-max-players">Players</label>
+              <select id="select-max-players">
+                <option value="2">2</option><option value="3">3</option><option value="4">4</option>
+                <option value="5">5</option><option value="6" selected>6</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="select-joker-mode">Wild joker</label>
+              <select id="select-joker-mode">
+                <option value="open" selected>Open — shown to everyone</option>
+                <option value="hidden">Hidden — unlocked with a pure sequence</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="select-printed-jokers">Printed jokers per pack</label>
+              <select id="select-printed-jokers"><option value="2" selected>2</option><option value="3">3</option></select>
+            </div>
+            <div class="form-group checkbox-row">
+              <label><input type="checkbox" id="chk-four-card"> Require a 4-card sequence</label>
+            </div>
+            <div class="form-group">
+              <label for="select-rank-metric">Rank by, if players change</label>
+              <select id="select-rank-metric">
+                <option value="averagePoints" selected>Average points</option>
+                <option value="gamesPerWin">Games per win</option>
+              </select>
+            </div>
+            <button id="btn-create-room" class="btn success-btn btn-block">Create room</button>
           </div>
-          <div class="form-group">
-            <label>Printed Jokers / Deck:</label>
-            <select id="select-printed-jokers">
-              <option value="2" selected>2 Jokers</option>
-              <option value="3">3 Jokers</option>
-            </select>
-          </div>
-          <div class="form-group checkbox-row">
-            <label><input type="checkbox" id="chk-four-card" checked> 4-card sequence required</label>
-          </div>
-          <div class="form-group">
-            <label>Secondary Ranking:</label>
-            <select id="select-rank-metric">
-              <option value="averagePoints" selected>Average Points</option>
-              <option value="gamesPerWin">Games Per Win</option>
-            </select>
-          </div>
-          <button id="btn-create-room" class="btn success-btn btn-block">Create Room</button>
         </div>
       </div>
 
-      <!-- Room Waiting Room (Appears once joined or created) -->
+      <details class="rules-help">
+        <summary>How to play</summary>
+        <ul>
+          <li>Each player gets 13 cards. On your turn, draw one card (closed or open pile), then discard one.</li>
+          <li>To win, arrange all 13 cards into valid groups and declare with one card as your finishing discard.</li>
+          <li>You need at least two sequences, and one must be pure (no jokers). The rest can be sequences or sets.</li>
+          <li>The wild joker and printed jokers can stand in for any card, except in a pure sequence.</li>
+          <li>Losers score the value of their unmatched cards (A, K, Q, J, 10 = 10; max 80). Lowest total wins.</li>
+          <li>Dropping costs 20 before your first turn, 40 after. A wrong declaration costs 80.</li>
+        </ul>
+      </details>
+
       <div id="room-waiting-area" class="waiting-area hidden">
         <hr class="divider">
-        <h2>Room Code: <span id="display-created-code" class="highlight-code">----</span></h2>
-        
+        <h2>Room <span id="display-created-code" class="highlight-code">----</span></h2>
         <div class="share-box">
           <div id="qrcode-container"></div>
           <div class="share-controls">
-            <input type="text" id="invite-link-input" readonly>
-            <button id="btn-copy-link" class="btn secondary-btn">Copy Invite Link</button>
+            <input type="text" id="invite-link-input" readonly aria-label="Invite link">
+            <button id="btn-copy-link" class="btn secondary-btn">Copy link</button>
           </div>
         </div>
-
         <div class="roster-list-container">
-          <h4>Connected Players (<span id="connected-count">0</span>/20):</h4>
+          <h4>Players (<span id="connected-count">0</span>/<span id="max-count">6</span>)</h4>
           <ul id="roster-list"></ul>
         </div>
-
-        <button id="btn-start-game" class="btn primary-btn btn-large hidden">Start Game</button>
-        <p id="waiting-host-msg" class="waiting-msg">Waiting for host to start...</p>
+        <p id="room-config-line" class="waiting-msg"></p>
+        <button id="btn-start-game" class="btn primary-btn btn-large hidden">Start game</button>
+        <p id="waiting-host-msg" class="waiting-msg">Waiting for the host to start…</p>
+        <button id="btn-leave-room" class="btn link-btn">Leave room</button>
       </div>
-
     </div>
   </div>
 
-  <!-- GAMEPLAY SCREEN (Hidden until match starts) -->
+  <!-- TABLE -->
   <div id="game-play-screen" class="hidden">
-    <!-- Inactive / Reduced-Time Rejoin Popup -->
-    <div id="rejoin-modal" class="modal-overlay hidden">
-      <div class="modal-box">
-        <h3>Turn Timer Reduced</h3>
-        <p>You missed turns or went offline. Your timer is currently reduced.</p>
-        <button id="btn-rejoin-active" class="btn primary-btn">Click to Join Back / Resume Active Play</button>
-      </div>
-    </div>
-
-    <!-- Temporary Pure Sequence Broadcast Banner (5 Seconds) -->
-    <div id="sequence-broadcast-banner" class="broadcast-banner hidden">
-      <span id="broadcast-player-name"></span> revealed a Pure Sequence:
-      <div id="broadcast-cards" class="card-strip"></div>
-    </div>
-
-    <!-- Top Room Bar -->
     <header class="game-header">
       <div class="room-info">
-        Room: <span id="game-room-id">--</span> | 
-        Timer: <span id="turn-timer-display" class="timer-text">--</span> |
-        Status: <span id="game-status-display">Playing</span>
+        <span class="room-chip">Room <b id="game-room-id">--</b></span>
+        <span id="game-status-display" class="status-text">Playing</span>
       </div>
       <div class="room-controls">
-        <button id="btn-pause-toggle" class="btn">Pause Game</button>
-        <button id="btn-leaderboard-toggle" class="btn">Points Table</button>
-        <button id="btn-exit-lobby" class="btn danger-btn">Exit to Lobby</button>
+        <button id="btn-pause-toggle" class="btn small hidden">Pause</button>
+        <button id="btn-leaderboard-toggle" class="btn small">Points</button>
+        <button id="btn-exit-lobby" class="btn small danger-btn">Leave</button>
       </div>
     </header>
 
-    <!-- Table Felt & Piles -->
     <main class="table-surface">
+      <div id="seats" class="seats"></div>
+
       <div class="center-play-area">
-        <!-- Closed Pile -->
-        <div id="closed-pile" class="card-pile card-back" title="Click to Draw">
-          <span class="pile-count" id="closed-count">0</span>
+        <div class="pile-col">
+          <button id="closed-pile" class="card-pile card-back" aria-label="Draw from closed pile">
+            <span class="pile-count" id="closed-count">0</span>
+          </button>
+          <span class="pile-label">Closed</span>
         </div>
-
-        <!-- Cut Joker Display -->
-        <div id="cut-joker-slot" class="card-slot">
-          <div id="cut-joker-card" class="card card-back">
-            <span id="joker-placeholder-label">Hidden</span>
-          </div>
+        <div class="pile-col">
+          <div id="cut-joker-card" class="card card-back"><span>?</span></div>
+          <span class="pile-label" id="joker-label">Wild joker</span>
         </div>
-
-        <!-- Open Discard Pile -->
-        <div id="open-pile" class="card-pile empty-slot" title="Click to Draw">
-          <div id="top-open-card" class="card empty"></div>
+        <div class="pile-col">
+          <button id="open-pile" class="card-pile empty-slot" aria-label="Draw from open pile">
+            <div id="top-open-card" class="card empty"></div>
+          </button>
+          <span class="pile-label">Open</span>
         </div>
       </div>
 
-      <!-- Active Player Hand & Controls Area -->
+      <div class="turn-strip">
+        <div id="turn-message" class="turn-message">Waiting…</div>
+        <div class="timer-track"><div id="timer-bar" class="timer-bar"></div></div>
+        <span id="turn-timer-display" class="timer-text">--</span>
+      </div>
+
       <section class="player-hand-container">
         <div class="hand-action-bar">
-          <button id="btn-reveal-joker" class="btn accent-btn hidden">Reveal Hidden Joker</button>
-          <button id="btn-auto-sort" class="btn">Auto Sort</button>
-          <button id="btn-drop" class="btn warning-btn">Drop / Fold</button>
-          <button id="btn-declare" class="btn success-btn">Declare</button>
+          <button id="btn-reveal-joker" class="btn accent-btn hidden">Reveal wild joker</button>
+          <button id="btn-group" class="btn" disabled>Group</button>
+          <button id="btn-ungroup" class="btn" disabled>Ungroup</button>
+          <button id="btn-sort" class="btn">Sort by suit</button>
+          <button id="btn-auto-sort" class="btn">Auto group</button>
+          <span class="spacer"></span>
+          <button id="btn-drop" class="btn warning-btn">Drop</button>
+          <button id="btn-discard" class="btn primary-btn" disabled>Discard</button>
+          <button id="btn-declare" class="btn success-btn" disabled>Finish</button>
         </div>
-
-        <!-- Grouped Card Melds Container -->
         <div id="melds-wrapper" class="melds-wrapper"></div>
+        <p class="hand-hint">Tap cards to select them, then Group. Double-tap a card to discard it. Drag cards between groups on a computer.</p>
       </section>
     </main>
+
+    <div id="show-banner" class="show-banner hidden">
+      <div><b id="show-winner"></b> has finished. Arrange your cards, then confirm — <b id="show-seconds">45</b>s left.</div>
+      <button id="btn-confirm-show" class="btn primary-btn">Confirm my cards</button>
+    </div>
+
+    <div id="sequence-broadcast-banner" class="broadcast-banner hidden">
+      <span id="broadcast-player-name"></span> unlocked the wild joker with a pure sequence
+      <div id="broadcast-cards" class="card-strip"></div>
+    </div>
   </div>
 
-  <!-- Full-Screen Points Table Modal -->
+  <!-- MODALS -->
+  <div id="rejoin-modal" class="modal-overlay hidden">
+    <div class="modal-box">
+      <h3>Your timer is shortened</h3>
+      <p>You missed a turn or went offline. Miss three in a row and you'll be dropped from the round.</p>
+      <button id="btn-rejoin-active" class="btn primary-btn">I'm back</button>
+    </div>
+  </div>
+
   <div id="leaderboard-modal" class="modal-overlay hidden">
     <div class="modal-box large-modal">
       <div class="modal-header">
-        <h2>Points Table</h2>
-        <button id="btn-close-leaderboard" class="close-x">&times;</button>
+        <h2 id="result-title">Points table</h2>
+        <button id="btn-close-leaderboard" class="close-x" aria-label="Close">&times;</button>
       </div>
-      <table class="leaderboard-table" id="leaderboard-table">
-        <thead>
-          <tr>
-            <th>Rank</th>
-            <th>Player</th>
-            <th>Total Points</th>
-            <th>Average Points</th>
-            <th>Games</th>
-            <th>Won</th>
-            <th>Games / Win</th>
-          </tr>
-        </thead>
-        <tbody id="leaderboard-body"></tbody>
-      </table>
+      <div id="round-results" class="round-results hidden"></div>
+      <div class="table-scroll">
+        <table class="leaderboard-table">
+          <thead>
+            <tr><th>#</th><th>Player</th><th>Total</th><th>Average</th><th>Played</th><th>Won</th><th>Games / win</th></tr>
+          </thead>
+          <tbody id="leaderboard-body"></tbody>
+        </table>
+      </div>
+      <p id="rank-note" class="rank-note"></p>
+      <div class="modal-actions">
+        <button id="btn-next-round" class="btn primary-btn hidden">Deal next round</button>
+        <p id="next-round-wait" class="waiting-msg hidden">Waiting for the host to deal the next round…</p>
+      </div>
     </div>
   </div>
 
