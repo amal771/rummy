@@ -1,4 +1,5 @@
-process.env.RUMMY_COUNTDOWN = '1';
+process.env.RUMMY_PLANNING = '1';
+process.env.RUMMY_NEXT = '30';
 process.env.RUMMY_SHOW = '2';
 const assert = require('assert');
 const http = require('http');
@@ -42,8 +43,35 @@ function player(url, key) {
   // only the host can start
   b.emit('game:trigger_start'); await wait(100);
   assert.strictEqual(room.status, 'LOBBY');
-  a.emit('game:trigger_start'); await wait(1600);
-  assert.strictEqual(room.status, 'PLAYING');
+  a.emit('game:trigger_start'); await wait(300);
+  assert.strictEqual(room.status, 'PLAYING', 'cards are dealt immediately');
+  assert(room.planning, 'planning period runs after the deal');
+  [a, b, c].forEach(p => assert.strictEqual(p.hand.length, 13));
+  const early = [a, b, c].find(p => p.key === room.turnOrder[0]);
+  early.emit('card:draw', { source: 'closed' }); await wait(100);
+  assert.strictEqual(early.hand.length, 13, 'cannot draw during planning');
+  // pause during planning: only the host can, and the clock really stops
+  b.emit('game:toggle_pause'); await wait(100);
+  assert(!room.isPaused, 'non-host cannot pause');
+  a.emit('game:toggle_pause'); await wait(100);
+  assert(room.isPaused && room.planning);
+  await wait(1500);
+  assert(room.planning, 'planning does not end while paused');
+  a.emit('game:toggle_pause'); await wait(1300);
+  assert(!room.isPaused && !room.planning, 'planning resumes and ends');
+
+  // pause during a turn: actions are refused, then the turn carries on
+  const cur0 = [a, b, c].find(p => p.key === room.turnOrder[room.activeTurnIndex]);
+  a.emit('game:toggle_pause'); await wait(100);
+  cur0.emit('card:draw', { source: 'closed' }); await wait(100);
+  assert.strictEqual(room.players.get(cur0.key).hand.length, 13, 'no draws while paused');
+  const left = room.pausedRemaining;
+  await wait(600);
+  assert.strictEqual(room.pausedRemaining, left, 'paused clock is frozen');
+  a.emit('game:toggle_pause'); await wait(100);
+  cur0.emit('card:draw', { source: 'closed' }); await wait(100);
+  assert.strictEqual(room.players.get(cur0.key).hand.length, 14, 'play continues after resume');
+  cur0.emit('card:discard', { cardId: cur0.hand[0].id }); await wait(100);
   [a, b, c].forEach(p => assert.strictEqual(p.hand.length, 13));
   assert(!room.cutJoker.isPrintedJoker, 'cut joker is never a printed joker');
   const all = new Set([a, b, c].flatMap(p => p.hand.map(x => x.id)));
@@ -119,10 +147,12 @@ function player(url, key) {
 
   // next round: only the host may start it; dealer rotates
   const firstRound1 = room.turnOrder[0];
-  b.emit('game:next_round'); await wait(100);
-  assert.strictEqual(room.status, 'ENDED');
-  a.emit('game:next_round'); await wait(200);
-  assert.strictEqual(room.status, 'PLAYING');
+  a.emit('game:ready'); await wait(100);
+  assert.strictEqual(room.status, 'ENDED', 'one ready player does not start the round');
+  P().filter(x => x !== a).forEach(x => x.emit('game:ready')); await wait(200);
+  assert.strictEqual(room.status, 'PLAYING', 'round starts as soon as everyone is ready');
+  assert(room.planning);
+  await wait(1200);
   assert.notStrictEqual(room.turnOrder[0], firstRound1, 'first player rotates each round');
   [...room.players.values()].forEach(pl => assert.strictEqual(pl.hand.length, 13));
 
@@ -154,7 +184,7 @@ function player(url, key) {
   assert.strictEqual(room.lastResult.winnerKey, t3.key);
 
   // wrong declaration => 80 and out
-  a.emit('game:next_round'); await wait(200);
+  P().forEach(x => x.emit('game:ready')); await wait(1500);
   const w = byKey[room.turnOrder[room.activeTurnIndex]];
   const wp = room.players.get(w.key);
   w.emit('card:draw', { source: 'closed' }); await wait(80);

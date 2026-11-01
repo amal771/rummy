@@ -9,7 +9,8 @@ const TURN_SECONDS = 45;
 const REDUCED_SECONDS = 10;
 const OFFLINE_SECONDS = 3;
 const MAX_MISSED_TURNS = 3;   // auto-drop after this many missed turns in a row
-const COUNTDOWN_SECONDS = Number(process.env.RUMMY_COUNTDOWN) || 10;
+const PLANNING_SECONDS = Number(process.env.RUMMY_PLANNING) || 20;    // arrange cards after the deal, before turn 1
+const NEXT_ROUND_SECONDS = Number(process.env.RUMMY_NEXT) || 60;      // auto-start of the next round
 const SHOW_SECONDS = Number(process.env.RUMMY_SHOW) || 45;
 const MAX_PLAYERS = 20;
 const FIRST_DROP = 20;
@@ -34,7 +35,7 @@ function registerSocketHandlers(io) {
   const active = room => [...room.players.values()].filter(p => p.status === 'ACTIVE');
   const activePlayer = room => room.players.get(room.turnOrder[room.activeTurnIndex]);
   const canUseJoker = (room, p) => room.config.jokerMode === 'open' || p.hasSeenHiddenJoker;
-  const inTurn = (room, p) => room.status === 'PLAYING' && !room.isPaused && activePlayer(room) === p;
+  const inTurn = (room, p) => room.status === 'PLAYING' && !room.planning && !room.isPaused && activePlayer(room) === p;
 
   function generateCode() {
     for (;;) {
@@ -85,9 +86,9 @@ function registerSocketHandlers(io) {
   }
 
   function broadcastTable(room) {
-    const act = room.status === 'PLAYING' ? activePlayer(room) : null;
+    const act = room.status === 'PLAYING' && !room.planning ? activePlayer(room) : null;
     toRoom(room, 'table:state', {
-      status: room.status, roundNo: room.roundNo, isPaused: room.isPaused,
+      status: room.status, roundNo: room.roundNo, isPaused: room.isPaused, planning: room.planning,
       activeKey: act ? act.key : null,
       openTop: room.openPile[room.openPile.length - 1] || null,
       closedCount: room.closedPile.length,
@@ -99,7 +100,7 @@ function registerSocketHandlers(io) {
   function sendSync(room, p) {
     const dealt = p.status !== 'SPECTATOR';
     toPlayer(p, 'game:sync', {
-      status: room.status, myStatus: p.status, isHost: p.key === room.hostKey, jokerMode: room.config.jokerMode,
+      status: room.status, paused: room.isPaused, myStatus: p.status, isHost: p.key === room.hostKey, jokerMode: room.config.jokerMode,
       inRound: dealt && ['PLAYING', 'SHOWING'].includes(room.status),
       hand: dealt ? p.hand : [], phase: p.phase,
       cutJoker: room.cutJoker && (canUseJoker(room, p) || room.status === 'ENDED') ? room.cutJoker : null,
@@ -107,7 +108,9 @@ function registerSocketHandlers(io) {
       showing: room.status === 'SHOWING'
         ? { winnerName: room.players.get(room.winnerKey).name, secondsLeft: Math.max(0, Math.round((room.showEndsAt - Date.now()) / 1000)), submitted: !!p.showGroups || room.winnerKey === p.key }
         : null,
-      turn: room.status === 'PLAYING' && activePlayer(room)
+      planning: room.planning ? { secondsLeft: Math.max(0, Math.round(((room.isPaused ? room.pausedRemaining : room.planningEndsAt - Date.now())) / 1000)) } : null,
+      nextRound: room.status === 'ENDED' ? { secondsLeft: Math.max(0, Math.round((room.nextEndsAt - Date.now()) / 1000)), ...readyInfo(room) } : null,
+      turn: room.status === 'PLAYING' && !room.planning && activePlayer(room)
         ? { activeKey: activePlayer(room).key, secondsLeft: Math.max(0, Math.round(((room.isPaused ? room.pausedRemaining : room.turnEndsAt - Date.now())) / 1000)) }
         : null,
       lastResult: room.status === 'ENDED' ? room.lastResult : null,
@@ -154,7 +157,8 @@ function registerSocketHandlers(io) {
         status: 'LOBBY', players: new Map(), rosterChanged: false, roundNo: 0,
         closedPile: [], openPile: [], cutJoker: null, turnOrder: [], activeTurnIndex: 0,
         turnTimer: null, turnEndsAt: 0, pausedRemaining: 0, isPaused: false,
-        countdownTimer: null, showTimer: null, cleanupTimer: null, hostTimer: null,
+        planning: false, pauseTimer: null, planningEndsAt: 0, planningTimer: null, nextTimer: null, nextEndsAt: 0, readyKeys: new Set(),
+        showTimer: null, cleanupTimer: null, hostTimer: null,
         winnerKey: null, showEndsAt: 0, lastResult: null,
       };
       rooms.set(room.roomId, room);
@@ -190,28 +194,21 @@ function registerSocketHandlers(io) {
 
     socket.on('room:leave', () => leaveRoom(socket, true));
 
+    // Host starts the game: cards are dealt straight away, then everyone gets a planning period
     socket.on('game:trigger_start', () => {
       const { room, player } = ctx(socket);
-      if (!room || player.key !== room.hostKey) return;
-      if (room.status === 'LOBBY') {
-        if (onlinePlayers(room).length < 2) return socket.emit('error', { message: 'You need at least 2 players to start.' });
-        room.status = 'STARTING';
-        let count = COUNTDOWN_SECONDS;
-        broadcastRoomState(room);
-        toRoom(room, 'game:countdown', { seconds: count });
-        room.countdownTimer = setInterval(() => {
-          count--;
-          toRoom(room, 'game:countdown', { seconds: count });
-          if (count <= 0) { clearInterval(room.countdownTimer); initiateRound(room); }
-        }, 1000);
-      }
+      if (!room || player.key !== room.hostKey || room.status !== 'LOBBY') return;
+      if (onlinePlayers(room).length < 2) return socket.emit('error', { message: 'You need at least 2 players to start.' });
+      initiateRound(room);
     });
 
-    socket.on('game:next_round', () => {
+    // Between rounds: the next one starts when everyone is ready, or after NEXT_ROUND_SECONDS
+    socket.on('game:ready', () => {
       const { room, player } = ctx(socket);
-      if (!room || player.key !== room.hostKey || room.status !== 'ENDED') return;
-      if (onlinePlayers(room).length < 2) return socket.emit('error', { message: 'You need at least 2 players online for another round.' });
-      initiateRound(room);
+      if (!room || room.status !== 'ENDED') return;
+      room.readyKeys.add(player.key);
+      broadcastReady(room);
+      checkAllReady(room);
     });
 
     socket.on('card:draw', ({ source } = {}) => {
@@ -301,16 +298,7 @@ function registerSocketHandlers(io) {
     socket.on('game:toggle_pause', () => {
       const { room, player } = ctx(socket);
       if (!room || player.key !== room.hostKey || room.status !== 'PLAYING') return;
-      room.isPaused = !room.isPaused;
-      if (room.isPaused) {
-        room.pausedRemaining = Math.max(1000, room.turnEndsAt - Date.now());
-        clearTimeout(room.turnTimer);
-      } else {
-        armTurnTimer(room, room.pausedRemaining / 1000);
-        toRoom(room, 'turn:start', { activeKey: activePlayer(room).key, durationSeconds: Math.ceil(room.pausedRemaining / 1000), isReduced: false, resumed: true });
-      }
-      toRoom(room, 'game:pause_state', { isPaused: room.isPaused });
-      broadcastTable(room);
+      setPaused(room, !room.isPaused);
     });
 
     socket.on('player:resume_active', () => {
@@ -334,10 +322,11 @@ function registerSocketHandlers(io) {
           if (host && host.isOffline) { transferHost(room); broadcastRoomState(room); broadcastTable(room); }
         }, 30000);
       }
-      if (room.status === 'PLAYING' && activePlayer(room) === player && !room.isPaused) {
+      if (room.status === 'PLAYING' && !room.planning && activePlayer(room) === player && !room.isPaused) {
         armTurnTimer(room, OFFLINE_SECONDS); // don't make the table wait for someone who left
       }
       if (room.status === 'SHOWING') checkShowComplete(room);
+      if (room.status === 'ENDED') { broadcastReady(room); checkAllReady(room); }
       broadcastRoomState(room);
       broadcastTable(room);
       if (!onlinePlayers(room).length) {
@@ -354,9 +343,65 @@ function registerSocketHandlers(io) {
     if (next) room.hostKey = next.key;
   }
 
+  function readyInfo(room) {
+    const online = onlinePlayers(room);
+    return { ready: online.filter(p => room.readyKeys.has(p.key)).map(p => p.key), total: online.length };
+  }
+  const broadcastReady = room => toRoom(room, 'round:ready_state', readyInfo(room));
+
+  function checkAllReady(room) {
+    if (room.status !== 'ENDED') return;
+    const i = readyInfo(room);
+    if (i.total >= 2 && i.ready.length === i.total) initiateRound(room);
+  }
+
+  function scheduleNextRound(room, seconds = NEXT_ROUND_SECONDS) {
+    clearTimeout(room.nextTimer);
+    room.nextEndsAt = Date.now() + seconds * 1000;
+    room.nextTimer = setTimeout(() => {
+      if (room.status !== 'ENDED') return;
+      if (onlinePlayers(room).length >= 2) return initiateRound(room);
+      toRoom(room, 'error', { message: 'Waiting for at least 2 players to deal the next round…' });
+      scheduleNextRound(room, 15);
+    }, seconds * 1000);
+  }
+
+  // Pause freezes whichever clock is running (planning or the current turn).
+  // It auto-resumes after 5 minutes so a missing host can never stall the table.
+  function setPaused(room, paused) {
+    if (room.status !== 'PLAYING' || room.isPaused === paused) return;
+    room.isPaused = paused;
+    clearTimeout(room.pauseTimer);
+    if (paused) {
+      if (room.planning) {
+        room.pausedRemaining = Math.max(1000, room.planningEndsAt - Date.now());
+        clearTimeout(room.planningTimer);
+      } else {
+        room.pausedRemaining = Math.max(1000, room.turnEndsAt - Date.now());
+        clearTimeout(room.turnTimer);
+      }
+      room.pauseTimer = setTimeout(() => setPaused(room, false), 5 * 60 * 1000);
+    } else if (room.planning) {
+      room.planningEndsAt = Date.now() + room.pausedRemaining;
+      room.planningTimer = setTimeout(() => endPlanning(room), room.pausedRemaining);
+      toRoom(room, 'round:planning', { seconds: Math.ceil(room.pausedRemaining / 1000), resumed: true });
+    } else {
+      armTurnTimer(room, room.pausedRemaining / 1000);
+      toRoom(room, 'turn:start', { activeKey: activePlayer(room).key, durationSeconds: Math.ceil(room.pausedRemaining / 1000), isReduced: false, resumed: true });
+    }
+    toRoom(room, 'game:pause_state', { isPaused: room.isPaused });
+    broadcastTable(room);
+  }
+
+  function endPlanning(room) {
+    if (room.status !== 'PLAYING' || !room.planning) return;
+    room.planning = false;
+    startPlayerTurn(room);
+  }
+
   function destroyRoom(room) {
-    clearTimeout(room.turnTimer); clearTimeout(room.showTimer);
-    clearInterval(room.countdownTimer); clearTimeout(room.cleanupTimer); clearTimeout(room.hostTimer);
+    clearTimeout(room.turnTimer); clearTimeout(room.showTimer); clearTimeout(room.planningTimer); clearTimeout(room.nextTimer); clearTimeout(room.pauseTimer);
+    clearTimeout(room.cleanupTimer); clearTimeout(room.hostTimer);
     rooms.delete(room.roomId);
   }
 
@@ -378,6 +423,7 @@ function registerSocketHandlers(io) {
     } else if (room.status === 'SHOWING') {
       checkShowComplete(room);
     }
+    if (room.status === 'ENDED') checkAllReady(room);
     if (['LOBBY', 'ENDED'].includes(room.status) || player.status === 'SPECTATOR') {
       room.players.delete(player.key);
       if (room.roundNo > 0) room.rosterChanged = true;
@@ -398,9 +444,12 @@ function registerSocketHandlers(io) {
     }
     if (!room.players.has(room.hostKey)) room.hostKey = [...room.players.keys()][0];
 
+    clearTimeout(room.nextTimer); clearTimeout(room.planningTimer);
+    room.readyKeys = new Set();
     room.status = 'PLAYING';
     room.roundNo++;
     room.isPaused = false;
+    clearTimeout(room.pauseTimer);
     room.winnerKey = null;
     room.lastResult = null;
 
@@ -432,7 +481,12 @@ function registerSocketHandlers(io) {
       });
     }
     broadcastRoomState(room);
-    startPlayerTurn(room);
+    // Planning period: cards are dealt, nobody plays yet, so everyone can arrange their hand
+    room.planning = true;
+    room.planningEndsAt = Date.now() + PLANNING_SECONDS * 1000;
+    toRoom(room, 'round:planning', { seconds: PLANNING_SECONDS });
+    broadcastTable(room);
+    room.planningTimer = setTimeout(() => endPlanning(room), PLANNING_SECONDS * 1000);
   }
 
   // ---------- turns ----------
@@ -454,7 +508,8 @@ function registerSocketHandlers(io) {
     p.phase = 'DRAW';
     p.lastDrawnId = null;
     const seconds = p.isOffline ? OFFLINE_SECONDS : p.missed > 0 ? REDUCED_SECONDS : TURN_SECONDS;
-    armTurnTimer(room, seconds);
+    if (room.isPaused) { room.pausedRemaining = seconds * 1000; room.turnEndsAt = Date.now() + seconds * 1000; }
+    else armTurnTimer(room, seconds);
     toRoom(room, 'turn:start', { activeKey: p.key, durationSeconds: seconds, isReduced: seconds < TURN_SECONDS });
     broadcastTable(room);
   }
@@ -523,7 +578,7 @@ function registerSocketHandlers(io) {
 
   function dropPlayer(room, p, penalty, auto = false) {
     if (p.status !== 'ACTIVE') return;
-    const wasTurn = room.status === 'PLAYING' && activePlayer(room) === p;
+    const wasTurn = room.status === 'PLAYING' && !room.planning && activePlayer(room) === p;
     p.status = 'DROPPED';
     p.phase = 'WAIT';
     p.roundScore = penalty;
@@ -559,9 +614,11 @@ function registerSocketHandlers(io) {
 
   function concludeRound(room, winnerKey) {
     if (room.status === 'ENDED') return;
-    clearTimeout(room.turnTimer); clearTimeout(room.showTimer);
+    clearTimeout(room.turnTimer); clearTimeout(room.showTimer); clearTimeout(room.planningTimer);
     room.status = 'ENDED';
     room.isPaused = false;
+    clearTimeout(room.pauseTimer);
+    room.planning = false;
 
     const results = [];
     for (const p of room.players.values()) {
@@ -606,7 +663,9 @@ function registerSocketHandlers(io) {
       results, leaderboard: rows,
       rankedBy: room.rosterChanged ? room.config.secondaryRankMetric : 'totalPoints',
     };
-    toRoom(room, 'round:ended', room.lastResult);
+    scheduleNextRound(room);
+    toRoom(room, 'round:ended', { ...room.lastResult, nextRoundSeconds: NEXT_ROUND_SECONDS });
+    broadcastReady(room);
     broadcastRoomState(room);
     broadcastTable(room);
   }

@@ -31,7 +31,7 @@ const isWild = c => !!c && (c.isPrintedJoker || (S.unlocked && S.cutJoker && c.r
 const cardById = id => S.hand.find(c => c.id === id);
 const me = () => S.table && S.table.players.find(p => p.key === S.key);
 const myStatus = () => (me() ? me().status : S.mySync || 'SPECTATOR');
-const isMyTurn = () => S.status === 'PLAYING' && S.activeKey === S.key && !(S.table && S.table.isPaused);
+const isMyTurn = () => S.status === 'PLAYING' && S.activeKey === S.key && !(S.table && (S.table.isPaused || S.table.planning));
 
 function makeCard(card, opts = {}) {
   const el = document.createElement('div');
@@ -103,9 +103,10 @@ function groupInfo(ids) {
 function renderHand() {
   const wrap = $('melds-wrapper');
   wrap.innerHTML = '';
-  S.layout.forEach(ids => {
+  S.layout.forEach((ids, gi) => {
     const col = document.createElement('div');
     col.className = 'meld-column';
+    col.dataset.group = gi;
     const strip = document.createElement('div');
     strip.className = 'meld-cards';
 
@@ -114,22 +115,15 @@ function renderHand() {
       if (!card) return;
       const el = makeCard(card);
       el.dataset.id = id;
-      el.draggable = true;
       el.tabIndex = 0;
       if (S.selected.has(id)) el.classList.add('selected');
       if (S.freshId === id) el.classList.add('fresh');
-      el.addEventListener('click', () => { S.selected.has(id) ? S.selected.delete(id) : S.selected.add(id); renderHand(); });
-      el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); el.click(); } });
-      el.addEventListener('dblclick', () => { if (canDiscard()) socket.emit('card:discard', { cardId: id }); });
-      el.addEventListener('dragstart', e => {
-        dragIds = S.selected.has(id) ? [...S.selected] : [id];
-        e.dataTransfer.effectAllowed = 'move';
-        e.dataTransfer.setData('text/plain', id);
-        setTimeout(() => el.classList.add('dragging'), 0);
+      el.addEventListener('pointerdown', e => cardPointerDown(e, id, el));
+      el.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSelect(id); }
+        else if (e.key === 'Delete' && canDiscard()) socket.emit('card:discard', { cardId: id });
       });
-      el.addEventListener('dragend', () => { dragIds = null; renderHand(); });
-      el.addEventListener('dragover', e => { if (dragIds) e.preventDefault(); });
-      el.addEventListener('drop', e => { if (!dragIds) return; e.preventDefault(); e.stopPropagation(); moveCards(dragIds, ids, id); });
+      el.addEventListener('contextmenu', e => e.preventDefault());
       strip.appendChild(el);
     });
 
@@ -138,23 +132,112 @@ function renderHand() {
     badge.className = `group-badge ${cls}`;
     badge.textContent = label;
     col.append(strip, badge);
-    col.addEventListener('dragover', e => { if (dragIds) { e.preventDefault(); col.classList.add('drop-target'); } });
-    col.addEventListener('dragleave', () => col.classList.remove('drop-target'));
-    col.addEventListener('drop', e => { if (!dragIds) return; e.preventDefault(); moveCards(dragIds, ids); });
     wrap.appendChild(col);
   });
 
-  if (dragIds || S.layout.length) {
-    const zone = document.createElement('div');
-    zone.className = 'new-group-zone';
-    zone.textContent = 'Drop here for a new group';
-    zone.addEventListener('dragover', e => { if (dragIds) { e.preventDefault(); zone.classList.add('drop-target'); } });
-    zone.addEventListener('dragleave', () => zone.classList.remove('drop-target'));
-    zone.addEventListener('drop', e => { if (!dragIds) return; e.preventDefault(); moveCards(dragIds, 'new'); });
-    if (window.matchMedia('(hover: hover)').matches) wrap.appendChild(zone);
-  }
+  const zone = document.createElement('div');
+  zone.className = 'new-group-zone';
+  zone.dataset.zone = 'new';
+  zone.textContent = 'Drop here for a new group';
+  wrap.appendChild(zone);
   updateControls();
 }
+
+function toggleSelect(id) {
+  S.selected.has(id) ? S.selected.delete(id) : S.selected.add(id);
+  renderHand();
+}
+
+// Pointer-based drag & drop (works with mouse and touch) plus real double-tap to discard.
+// Touch: press and hold briefly to pick a card up; a quick swipe still scrolls the hand.
+let drag = null, lastTap = { id: null, t: 0 };
+const HOLD_MS = 170, MOVE_PX = 6, DOUBLE_TAP_MS = 320;
+
+function cardPointerDown(e, id, el) {
+  if (e.button > 0 || drag) return;
+  drag = { id, el, x0: e.clientX, y0: e.clientY, active: false, touch: e.pointerType !== 'mouse', ghost: null, ids: null, target: null };
+  if (drag.touch) {
+    drag.timer = setTimeout(() => { if (drag && !drag.active) beginDrag(); }, HOLD_MS);
+  }
+}
+
+function beginDrag() {
+  const d = drag;
+  d.active = true;
+  d.ids = S.selected.has(d.id) ? S.layout.flat().filter(i => S.selected.has(i)) : [d.id];
+  const ghost = d.el.cloneNode(true);
+  ghost.className = d.el.className.replace(/selected|fresh/g, '') + ' drag-ghost';
+  if (d.ids.length > 1) ghost.insertAdjacentHTML('beforeend', `<span class="ghost-count">${d.ids.length}</span>`);
+  document.body.appendChild(ghost);
+  d.ghost = ghost;
+  document.body.classList.add('is-dragging');
+  document.querySelectorAll('#melds-wrapper .card').forEach(c => { if (d.ids.includes(c.dataset.id)) c.classList.add('dragging'); });
+  if (navigator.vibrate) navigator.vibrate(12);
+}
+
+function dropTargetAt(x, y) {
+  const el = document.elementFromPoint(x, y);
+  if (!el) return null;
+  const card = el.closest('#melds-wrapper .card');
+  const col = el.closest('.meld-column');
+  if (el.closest('.new-group-zone')) return { type: 'new' };
+  if (col) return { type: 'group', col, beforeId: card ? card.dataset.id : null };
+  if (el.closest('#melds-wrapper')) return { type: 'new' };   // blank space in the hand = new group
+  return null;
+}
+
+document.addEventListener('pointermove', e => {
+  if (!drag) return;
+  const dist = Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0);
+  if (!drag.active) {
+    if (!drag.touch && dist > MOVE_PX) beginDrag();
+    else if (drag.touch && dist > 10) { clearTimeout(drag.timer); drag = null; return; } // user is scrolling
+    else return;
+  }
+  drag.ghost.style.transform = `translate(${e.clientX - 29}px, ${e.clientY - 42}px) rotate(4deg)`;
+  const t = dropTargetAt(e.clientX, e.clientY);
+  document.querySelectorAll('.drop-target').forEach(n => n.classList.remove('drop-target'));
+  if (t) (t.type === 'group' ? t.col : document.querySelector('.new-group-zone')).classList.add('drop-target');
+  drag.target = t;
+});
+
+document.addEventListener('pointerup', e => {
+  if (!drag) return;
+  const d = drag;
+  clearTimeout(d.timer);
+  drag = null;
+  if (d.active) {
+    d.ghost.remove();
+    document.body.classList.remove('is-dragging');
+    const t = dropTargetAt(e.clientX, e.clientY);
+    if (t && t.type === 'group') moveCards(d.ids, S.layout[+t.col.dataset.group], t.beforeId);
+    else if (t && t.type === 'new') moveCards(d.ids, 'new');
+    else renderHand();
+    return;
+  }
+  // a tap: second tap on the same card within the window discards it
+  const now = Date.now();
+  if (lastTap.id === d.id && now - lastTap.t < DOUBLE_TAP_MS && canDiscard()) {
+    lastTap = { id: null, t: 0 };
+    S.selected.clear();
+    socket.emit('card:discard', { cardId: d.id });
+    return;
+  }
+  lastTap = { id: d.id, t: now };
+  toggleSelect(d.id);
+});
+
+function cancelDrag() {
+  if (!drag) return;
+  clearTimeout(drag.timer);
+  if (drag.ghost) drag.ghost.remove();
+  document.body.classList.remove('is-dragging');
+  drag = null;
+  renderHand();
+}
+document.addEventListener('pointercancel', cancelDrag);
+// once a touch drag has started, stop the page from scrolling under the finger
+document.addEventListener('touchmove', e => { if (drag && drag.active && e.cancelable) e.preventDefault(); }, { passive: false });
 
 // ---------- controls & messages ----------
 const canDiscard = () => isMyTurn() && S.phase === 'DISCARD';
@@ -184,6 +267,8 @@ function updateMessage() {
   const nameOf = k => (t && t.players.find(p => p.key === k) || {}).name || 'Someone';
   if (S.status === 'PLAYING') {
     if (t && t.isPaused) msg = 'Game paused by the host';
+    else if (t && t.planning) msg = 'Cards dealt: arrange your hand. The first turn starts when the timer ends.';
+    else if (t && t.isPaused) msg = 'Game paused by the host';
     else if (myStatus() === 'SPECTATOR') msg = "You'll join the next round";
     else if (myStatus() !== 'ACTIVE') msg = 'You are out of this round';
     else if (S.activeKey === S.key) {
@@ -191,7 +276,7 @@ function updateMessage() {
       msg = S.phase === 'DRAW' ? 'Your turn: draw from the closed or open pile' : 'Select one card, then Discard it or Finish with it';
     } else msg = `${nameOf(S.activeKey)} is playing…`;
   } else if (S.status === 'SHOWING') msg = 'Round finished: players are confirming their cards';
-  else if (S.status === 'ENDED') msg = 'Round over';
+  else if (S.status === 'ENDED') msg = 'Round over: tap Ready for the next round';
   el.textContent = msg;
   el.classList.toggle('mine', mine);
   $('game-status-display').textContent = t ? `Round ${t.roundNo}` : '';
@@ -226,6 +311,7 @@ function renderTable(t) {
   const open = $('top-open-card');
   open.replaceWith(Object.assign(makeCard(t.openTop), { id: 'top-open-card' }));
   $('btn-pause-toggle').classList.toggle('hidden', !(S.isHost && t.status === 'PLAYING'));
+  showPauseBanner(t.status === 'PLAYING' && t.isPaused);
   closeMenu();
   $('btn-pause-toggle').textContent = t.isPaused ? 'Resume' : 'Pause';
 
@@ -248,6 +334,11 @@ function renderTable(t) {
   });
   renderCutJoker();
   updateControls();
+}
+
+function showPauseBanner(paused) {
+  $('pause-banner').classList.toggle('hidden', !paused);
+  $('btn-resume-banner').classList.toggle('hidden', !S.isHost);
 }
 
 function renderCutJoker() {
@@ -373,21 +464,11 @@ socket.on('room:state_sync', st => {
   });
   const c = st.config;
   $('room-config-line').textContent = `${c.jokerMode === 'open' ? 'Open' : 'Hidden'} wild joker · ${c.printedJokersPerDeck} printed jokers per pack${c.requireFourCardSeq ? ' · 4-card sequence required' : ''}`;
-  if (st.status === 'LOBBY') {
-    $('btn-start-game').disabled = false;
-    $('btn-start-game').textContent = 'Start game';
-  }
-});
-
-socket.on('game:countdown', ({ seconds }) => {
-  $('btn-start-game').disabled = true;
-  $('btn-start-game').textContent = `Starting in ${Math.max(seconds, 0)}…`;
-  $('waiting-host-msg').textContent = `Game starts in ${Math.max(seconds, 0)}s`;
 });
 
 function resetForRound() {
   S.layout = []; S.selected.clear(); S.showSubmitted = false; S.lastResult = null; S.phase = 'WAIT';
-  clearInterval(showHandle);
+  clearInterval(showHandle); clearInterval(S.nextTick);
   $('show-banner').classList.add('hidden');
   $('leaderboard-modal').classList.add('hidden');
   $('rejoin-modal').classList.add('hidden');
@@ -414,8 +495,10 @@ socket.on('game:sync', d => {
     if (d.hand.length) syncLayout(d.hand);
     renderCutJoker(); renderHand();
     if (d.turn) { S.activeKey = d.turn.activeKey; startTimer(Math.max(1, d.turn.secondsLeft)); }
+    if (d.planning) startTimer(Math.max(1, d.planning.secondsLeft));
+    if (d.paused) stopTimer('Paused');
     if (d.showing) beginShow(d.showing.winnerName, d.showing.secondsLeft, d.showing.submitted);
-    if (d.lastResult) showResult(d.lastResult);
+    if (d.lastResult) showResult(d.lastResult, d.nextRound);
   } else show('lobby');
 });
 
@@ -424,6 +507,8 @@ socket.on('table:state', t => {
   if (wasLobby && ['PLAYING', 'SHOWING'].includes(t.status) && t.players.some(p => p.key === S.key)) show('game');
   renderTable(t);
 });
+
+socket.on('round:planning', ({ seconds, resumed }) => { stopTimer(); startTimer(seconds); if (!resumed) toast('Cards dealt. Use the time to arrange your hand.'); });
 
 socket.on('turn:start', ({ activeKey, durationSeconds, isReduced, resumed }) => {
   S.activeKey = activeKey;
@@ -474,6 +559,7 @@ socket.on('player:knocked_out', ({ name }) => toast(`${name} made a wrong declar
 socket.on('declaration:result', () => toast('Wrong declaration: 80 points, and you are out of this round.', true, 5000));
 socket.on('game:pause_state', ({ isPaused }) => {
   if (isPaused) stopTimer('Paused');
+  showPauseBanner(isPaused);
   toast(isPaused ? 'Host paused the game.' : 'Game resumed.');
 });
 socket.on('player:resumed', () => {});
@@ -529,13 +615,17 @@ function renderLeaderboardRows(rows) {
   });
 }
 
-function showResult(r) {
+function showResult(r, next) {
   S.lastResult = r;
+  const secs = next ? next.secondsLeft : (r.nextRoundSeconds || 60);
+  S.nextEnd = Date.now() + secs * 1000;
+  S.iAmReady = !!(next && next.ready.includes(S.key));
+  if (next) S.readyInfo = { ready: next.ready, total: next.total };
   S.status = 'ENDED';
   S.cutJoker = r.cutJoker; S.unlocked = true;
   clearInterval(showHandle);
   $('show-banner').classList.add('hidden');
-  stopTimer('--');
+  startTimer(Math.max(1, secs));
   $('result-title').textContent = r.winnerName ? `${r.winnerName} wins the round` : 'Round over';
   const box = $('round-results');
   box.classList.remove('hidden');
@@ -564,14 +654,27 @@ function showResult(r) {
   });
   renderLeaderboardRows(r.leaderboard);
   $('rank-note').textContent = rankNote(r);
-  $('btn-next-round').classList.toggle('hidden', !S.isHost);
-  $('next-round-wait').classList.toggle('hidden', S.isHost);
+  $('btn-next-round').classList.remove('hidden');
+  $('next-round-wait').classList.remove('hidden');
+  updateReadyUI();
+  clearInterval(S.nextTick);
+  S.nextTick = setInterval(updateReadyUI, 500);
   $('leaderboard-modal').classList.remove('hidden');
   renderCutJoker(); renderHand();
 }
-socket.on('round:ended', showResult);
+socket.on('round:ended', r => { S.iAmReady = false; S.readyInfo = { ready: [], total: (S.table ? S.table.players.length : 0) }; showResult(r); });
+socket.on('round:ready_state', info => { S.readyInfo = info; S.iAmReady = info.ready.includes(S.key); updateReadyUI(); });
 
-$('btn-next-round').addEventListener('click', () => socket.emit('game:next_round'));
+function updateReadyUI() {
+  const left = Math.max(0, Math.ceil(((S.nextEnd || 0) - Date.now()) / 1000));
+  const info = S.readyInfo || { ready: [], total: 0 };
+  $('next-round-wait').textContent = `Next round starts in ${left}s, or as soon as everyone is ready · ${info.ready.length}/${info.total} ready`;
+  const btn = $('btn-next-round');
+  btn.disabled = !!S.iAmReady;
+  btn.textContent = S.iAmReady ? 'Ready ✓ waiting for others' : 'Ready for next round';
+}
+
+$('btn-next-round').addEventListener('click', () => { S.iAmReady = true; updateReadyUI(); socket.emit('game:ready'); });
 $('btn-leaderboard-toggle').addEventListener('click', () => {
   if (S.lastResult) { showResult(S.lastResult); return; }
   $('round-results').classList.add('hidden');
@@ -630,7 +733,8 @@ $('btn-declare').addEventListener('click', () => {
   socket.emit('round:declare', { groups, finishCardId });
 });
 
-$('btn-pause-toggle').addEventListener('click', () => { closeMenu(); socket.emit('game:toggle_pause'); });
+$('btn-pause-toggle').addEventListener('click', () => socket.emit('game:toggle_pause'));
+$('btn-resume-banner').addEventListener('click', () => socket.emit('game:toggle_pause'));
 
 // ---------- menu & full screen ----------
 function closeMenu() { $('menu-panel').classList.add('hidden'); $('btn-menu').setAttribute('aria-expanded', 'false'); }

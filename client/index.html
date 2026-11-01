@@ -84,6 +84,7 @@
       <details class="rules-help">
         <summary>How to play</summary>
         <ul>
+          <li>Cards are dealt as soon as the host starts, then everyone gets 20 seconds to arrange their hand before the first turn.</li>
           <li>Each player gets 13 cards. On your turn, draw one card (closed or open pile), then discard one.</li>
           <li>To win, arrange all 13 cards into valid groups and declare with one card as your finishing discard.</li>
           <li>You need at least two sequences, and one must be pure (no jokers). The rest can be sequences or sets.</li>
@@ -123,12 +124,12 @@
         <span id="game-status-display" class="status-text">Playing</span>
       </div>
       <div class="room-controls">
+        <button id="btn-pause-toggle" class="btn small warning-btn hidden">Pause</button>
         <button id="btn-leaderboard-toggle" class="btn small">Points</button>
         <div class="menu-wrap">
           <button id="btn-menu" class="btn small" aria-haspopup="true" aria-expanded="false" aria-label="Menu">⋮</button>
           <div id="menu-panel" class="menu-panel hidden" role="menu">
             <button id="btn-fullscreen" class="menu-item" role="menuitem">Full screen</button>
-            <button id="btn-pause-toggle" class="menu-item hidden" role="menuitem">Pause</button>
             <button id="btn-exit-lobby" class="menu-item danger" role="menuitem">Leave game</button>
           </div>
         </div>
@@ -177,7 +178,7 @@
           <button id="btn-declare" class="btn success-btn" disabled>Finish</button>
         </div>
         
-        <p class="hand-hint">Tap cards to select them, then Group. Double-tap a card to discard it. Drag cards between groups on a computer.</p>
+        <p class="hand-hint">Tap cards to select them, then Group. Press and hold a card to drag it into a group. Double-tap a card to discard it.</p>
       </section>
     </main>
 
@@ -186,7 +187,12 @@
       <button id="btn-confirm-show" class="btn primary-btn">Confirm my cards</button>
     </div>
 
-    <div id="sequence-broadcast-banner" class="broadcast-banner hidden">
+    <div id="pause-banner" class="pause-banner hidden" role="status">
+    <span>⏸ Game paused by the host. Timers are stopped.</span>
+    <button id="btn-resume-banner" class="btn small primary-btn hidden">Resume</button>
+  </div>
+
+  <div id="sequence-broadcast-banner" class="broadcast-banner hidden">
       <span id="broadcast-player-name"></span> unlocked the wild joker with a pure sequence
       <div id="broadcast-cards" class="card-strip"></div>
     </div>
@@ -218,8 +224,8 @@
       </div>
       <p id="rank-note" class="rank-note"></p>
       <div class="modal-actions">
-        <button id="btn-next-round" class="btn primary-btn hidden">Deal next round</button>
-        <p id="next-round-wait" class="waiting-msg hidden">Waiting for the host to deal the next round…</p>
+        <button id="btn-next-round" class="btn primary-btn hidden">Ready for next round</button>
+        <p id="next-round-wait" class="waiting-msg hidden"></p>
       </div>
     </div>
   </div>

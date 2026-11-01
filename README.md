@@ -17,8 +17,11 @@ npm test           # rules + full multiplayer flow tests
 - Finish by discarding one card face-down and declaring. Other players get 45 seconds to arrange and confirm their cards.
 - Scoring: A/K/Q/J/10 = 10, 2–9 face value, jokers 0, capped at 80. No pure sequence = 80.
 - Drop = 20 before your first turn, 40 after. Wrong declaration = 80 and out of the round.
+- The host can pause and resume from the header button, during planning or any turn (auto-resumes after 5 minutes).
 - Missing three turns in a row drops you. Disconnected players are auto-played and can rejoin from the same browser.
-- The host deals each next round; the first player rotates.
+- Cards are dealt as soon as the host starts, then everyone gets a 20-second planning period to arrange their hand before turn 1.
+- After a round, the next one starts after 60 seconds, or immediately once every player has pressed **Ready for next round**. The first player rotates.
+- Hand controls: tap to select, double-tap to discard, press-and-hold (touch) or click-and-drag (mouse) to move cards between groups.
 
 ## Layout
 
