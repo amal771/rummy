@@ -1,93 +1,54 @@
-const { classifyGroup, isValidPureSequence, isWildcard } = require('./validator');
+const { classifyGroup, isWildcard } = require('./validator');
 
+// Jokers/wildcards = 0, A K Q J 10 = 10, 2-9 = face value
 function getCardPoints(card, cutJoker, hasUnlockedJoker) {
   if (isWildcard(card, cutJoker, hasUnlockedJoker)) return 0;
-  if (card.rank >= 10) return 10; // 10, J, Q, K, A
-  return card.rank;
+  return card.rank >= 10 ? 10 : card.rank;
+}
+
+function analyse(groups, cutJoker, unlocked) {
+  let pure = 0, seq = 0, four = false;
+  const types = groups.map(g => {
+    const t = classifyGroup(g, cutJoker, unlocked);
+    if (t === 'Pure Sequence' || t === 'Impure Sequence') {
+      seq++;
+      if (t === 'Pure Sequence') pure++;
+      if (g.length >= 4) four = true;
+    }
+    return t;
+  });
+  return { types, pure, seq, four };
+}
+
+const qualifies = (a, req4) => a.pure >= 1 && a.seq >= 2 && (!req4 || a.four);
+
+/**
+ * A valid declaration: every group is a valid meld, with at least one pure
+ * sequence and at least two sequences in total (and a 4+ card sequence if the
+ * room requires it).
+ */
+function validateDeclaration(groups, cutJoker, requireFourCardSeq = true, unlocked = true) {
+  const a = analyse(groups, cutJoker, unlocked);
+  return !a.types.includes('Invalid') && qualifies(a, requireFourCardSeq);
 }
 
 /**
- * Validates a declaration:
- * - At least 2 sequences
- * - At least 1 pure sequence
- * - If requireFourCardSeq is true: at least one sequence (pure or impure) must have length >= 4
- * - All other cards in valid sets/sequences
+ * Deadwood points for a losing hand (max 80):
+ *  - no pure sequence            -> 80
+ *  - pure but not qualifying     -> everything outside pure sequences counts
+ *  - qualifying hand             -> only cards outside valid melds count
  */
-function validateDeclaration(groupedMelds, cutJoker, requireFourCardSeq = true) {
-  let pureCount = 0;
-  let totalSeqCount = 0;
-  let hasFourCardSeq = false;
-
-  for (const group of groupedMelds) {
-    const status = classifyGroup(group, cutJoker, true);
-    if (status === 'Pure Sequence') {
-      pureCount++;
-      totalSeqCount++;
-      if (group.length >= 4) hasFourCardSeq = true;
-    } else if (status === 'Impure Sequence') {
-      totalSeqCount++;
-      if (group.length >= 4) hasFourCardSeq = true;
-    } else if (status !== 'Set') {
-      return false; // Found an Invalid group
-    }
-  }
-
-  if (pureCount < 1) return false;
-  if (totalSeqCount < 2) return false;
-  if (requireFourCardSeq && !hasFourCardSeq) return false;
-
-  return true;
-}
-
-/**
- * Calculates deadwood points.
- * Rule: Points stay frozen at 80 until minimum qualifying conditions are met.
- */
-function calculateHandPoints(groupedMelds, cutJoker, hasUnlockedJoker, requireFourCardSeq = true) {
-  let pureCount = 0;
-  let totalSeqCount = 0;
-  let hasFourCardSeq = false;
-
-  const validGroups = [];
-  const deadwoodGroups = [];
-
-  for (const group of groupedMelds) {
-    const status = classifyGroup(group, cutJoker, hasUnlockedJoker);
-    if (status === 'Pure Sequence') {
-      pureCount++;
-      totalSeqCount++;
-      if (group.length >= 4) hasFourCardSeq = true;
-      validGroups.push(group);
-    } else if (status === 'Impure Sequence') {
-      totalSeqCount++;
-      if (group.length >= 4) hasFourCardSeq = true;
-      validGroups.push(group);
-    } else if (status === 'Set') {
-      validGroups.push(group);
-    } else {
-      deadwoodGroups.push(group);
-    }
-  }
-
-  // Freeze at 80 if baseline qualifying sequences are not formed
-  const qualifies = pureCount >= 1 && totalSeqCount >= 2 && (!requireFourCardSeq || hasFourCardSeq);
-  if (!qualifies) {
-    return 80;
-  }
-
-  // Calculate sum of invalid/unmelded cards
+function calculateHandPoints(groups, cutJoker, hasUnlockedJoker, requireFourCardSeq = true) {
+  const a = analyse(groups, cutJoker, hasUnlockedJoker);
+  if (a.pure === 0) return 80;
+  const ok = qualifies(a, requireFourCardSeq);
   let points = 0;
-  for (const group of deadwoodGroups) {
-    for (const card of group) {
-      points += getCardPoints(card, cutJoker, hasUnlockedJoker);
-    }
-  }
-
+  groups.forEach((g, i) => {
+    const t = a.types[i];
+    const counts = ok ? t === 'Invalid' : t !== 'Pure Sequence';
+    if (counts) g.forEach(c => { points += getCardPoints(c, cutJoker, hasUnlockedJoker); });
+  });
   return Math.min(80, points);
 }
 
-module.exports = {
-  validateDeclaration,
-  calculateHandPoints,
-  getCardPoints,
-};
+module.exports = { validateDeclaration, calculateHandPoints, getCardPoints };
