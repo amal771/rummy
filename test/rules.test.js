@@ -78,3 +78,16 @@ t('worst-case search is fast', () => {
 });
 
 console.log(`rules: ${n} test groups passed`);
+
+// big tables: enough cards for 20 players, all ids unique
+const Deck = require('../server/models/Deck');
+for (const n of [2, 6, 15, 20]) {
+  const d = new Deck(n, 2);
+  assert(d.cards.length >= n * 13 + 2 + 30, `deck too small for ${n}`);
+  assert.strictEqual(new Set(d.cards.map(c => c.id)).size, d.cards.length);
+}
+const hands = Array.from({ length: 15 }, () => new Deck(15, 2).cards.slice(0, 13));
+const t0 = Date.now();
+hands.forEach(h => bestArrangement(h, C('H', 5), true, true));
+assert(Date.now() - t0 < 4000, 'scoring 15 hands should be quick');
+console.log('rules: large-table checks passed (' + (Date.now() - t0) + 'ms for 15 hands)');
