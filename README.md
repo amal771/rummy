@@ -18,6 +18,8 @@ npm test           # rules + full multiplayer flow tests
 - Scoring: A/K/Q/J/10 = 10, 2–9 face value, jokers 0, capped at 80. No pure sequence = 80.
 - Drop = 20 before your first turn, 40 after. Wrong declaration = 80 and out of the round.
 - The host can pause and resume from the header button, during planning or any turn (auto-resumes after 5 minutes).
+- The host picks the turn time in the lobby: 30, 45, 60, 90 or 120 seconds (reduced timer after a missed turn stays 10s).
+- Full screen: Android and desktop use the Full screen button. iPhone does not allow it in Safari, so the button explains how to add the game to the Home Screen, where it runs without the address bar.
 - Missing three turns in a row drops you. Disconnected players are auto-played and can rejoin from the same browser.
 - Cards are dealt as soon as the host starts, then everyone gets a 20-second planning period to arrange their hand before turn 1.
 - After a round, the next one starts after 60 seconds, or immediately once every player has pressed **Ready for next round**. The first player rotates.
